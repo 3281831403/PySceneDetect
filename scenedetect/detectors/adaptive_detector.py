@@ -21,6 +21,7 @@ from logging import getLogger
 import numpy as np
 
 from scenedetect.common import FrameTimecode, TimecodeLike
+from scenedetect.detector import FlashFilter
 from scenedetect.detectors import ContentDetector
 
 logger = getLogger("pyscenedetect")
@@ -94,6 +95,12 @@ class AdaptiveDetector(ContentDetector):
     @property
     def event_buffer_length(self) -> int:
         return self.window_width
+
+    @property
+    def min_scene_len_filter(self) -> FlashFilter:
+        """A :class:`FlashFilter <scenedetect.detector.FlashFilter>` representing the
+        `min_scene_len` this detector enforces between cuts."""
+        return FlashFilter(mode=FlashFilter.Mode.SUPPRESS, length=self.min_scene_len)
 
     def get_metrics(self) -> list[str]:
         return [*super().get_metrics(), self._adaptive_ratio_key]

@@ -157,6 +157,12 @@ class TransnetV2Detector(SceneDetector):
         # `min_scene_len` which should be specified in seconds, not frames.
         self._flash_filter = FlashFilter(mode=filter_mode, length=min_scene_len)
 
+    @property
+    def min_scene_len_filter(self) -> FlashFilter:
+        """The :class:`FlashFilter <scenedetect.detector.FlashFilter>` used to enforce
+        `min_scene_len` on cuts emitted by this detector."""
+        return self._flash_filter
+
     def mk_ft(self, pts: int):
         # t = Timecode(pts=pts, time_base=self.time_base)
         t = float(pts * self.time_base)

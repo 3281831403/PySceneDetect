@@ -19,7 +19,8 @@ import pytest
 
 from scenedetect.backends.opencv import VideoStreamCv2
 from scenedetect.common import FrameTimecode
-from scenedetect.detectors import AdaptiveDetector, ContentDetector
+from scenedetect.detector import FlashFilter, SceneDetector
+from scenedetect.detectors import AdaptiveDetector, ContentDetector, ThresholdDetector
 from scenedetect.scene_manager import SceneManager, expand_scenes_to_bounds
 
 TEST_VIDEO_START_FRAMES_ACTUAL = [150, 180, 394]
@@ -261,3 +262,102 @@ def test_expand_scenes_to_bounds_does_not_mutate_input():
     expand_scenes_to_bounds(scenes, start=t0, end=t300)
 
     assert scenes == original
+
+
+class _StubDetector(SceneDetector):
+    """Detector which emits no cuts itself; cuts are injected into the SceneManager directly."""
+
+    def __init__(self, min_scene_len=0):
+        super().__init__()
+        self._min_scene_len = min_scene_len
+
+    def process_frame(self, timecode, frame_img):
+        return []
+
+    @property
+    def min_scene_len_filter(self) -> FlashFilter:
+        return FlashFilter(mode=FlashFilter.Mode.SUPPRESS, length=self._min_scene_len)
+
+
+def _make_manager_with_cuts(cut_lists, min_scene_len, fps=30.0, last_frame=999) -> SceneManager:
+    """Create a SceneManager with one stub detector per entry in `cut_lists`, and the union
+    of all cuts injected as if they were detected."""
+    sm = SceneManager()
+    for _ in cut_lists:
+        sm.add_detector(_StubDetector(min_scene_len=min_scene_len))
+    sm._cutting_list = [FrameTimecode(cut, fps) for cuts in cut_lists for cut in cuts]
+    sm._base_timecode = FrameTimecode(0, fps)
+    sm._start_pos = FrameTimecode(0, fps)
+    sm._last_pos = FrameTimecode(last_frame, fps)
+    return sm
+
+
+def test_cut_list_multi_detector_enforces_min_scene_len():
+    """Cuts merged from multiple detectors must not create intermediate scenes shorter than
+    the minimum scene length."""
+    # Cuts from the second detector are 15/17 frames after those of the first.
+    sm = _make_manager_with_cuts([[100, 300, 500], [115, 317]], min_scene_len=18)
+    cuts = [cut.frame_num for cut in sm.get_cut_list(show_warning=False)]
+    assert cuts == [100, 300, 500]
+    # get_scene_list must be consistent with get_cut_list.
+    scene_list = sm.get_scene_list()
+    assert [start.frame_num for start, _ in scene_list][1:] == cuts
+    for start, end in scene_list[1:-1]:
+        assert (end - start).frame_num >= 18
+
+
+def test_cut_list_multi_detector_shorter_min_scene_len_keeps_cuts():
+    """Cuts closer together than a larger min_scene_len are kept when the minimum is lowered."""
+    sm = _make_manager_with_cuts([[100, 300, 500], [115, 317]], min_scene_len=9)
+    cuts = [cut.frame_num for cut in sm.get_cut_list(show_warning=False)]
+    assert cuts == [100, 115, 300, 317, 500]
+
+
+def test_cut_list_multi_detector_first_and_last_scene_exempt():
+    """The first and last scenes are exempt from the minimum scene length."""
+    sm = _make_manager_with_cuts([[5, 100, 300], [995]], min_scene_len=18)
+    cuts = [cut.frame_num for cut in sm.get_cut_list(show_warning=False)]
+    assert cuts == [5, 100, 300, 995]
+
+
+def test_cut_list_single_detector_unchanged():
+    """With a single detector, cuts are returned exactly as detected, even if they are closer
+    together than the minimum scene length."""
+    sm = _make_manager_with_cuts([[100, 110, 112]], min_scene_len=18)
+    cuts = [cut.frame_num for cut in sm.get_cut_list(show_warning=False)]
+    assert cuts == [100, 110, 112]
+
+
+def test_multi_detector_min_scene_len_end_to_end(test_video_file):
+    """Multiple detectors used together must not produce intermediate scenes shorter than
+    min_scene_len, while a single detector's cuts remain unchanged."""
+    min_scene_len = 0.6
+
+    def detect(detectors):
+        video = VideoStreamCv2(test_video_file)
+        sm = SceneManager()
+        for detector in detectors:
+            sm.add_detector(detector)
+        sm.detect_scenes(video=video)
+        cuts = [cut.frame_num for cut in sm.get_cut_list(show_warning=False)]
+        scenes = sm.get_scene_list(start_in_scene=True)
+        return cuts, scenes
+
+    single_cuts, _ = detect([ContentDetector(min_scene_len=min_scene_len)])
+    multi_cuts, multi_scenes = detect(
+        [
+            ContentDetector(min_scene_len=min_scene_len),
+            ThresholdDetector(min_scene_len=min_scene_len),
+            AdaptiveDetector(min_scene_len=min_scene_len),
+        ]
+    )
+    # get_cut_list and get_scene_list must agree.
+    assert [start.frame_num for start, _ in multi_scenes][1:] == multi_cuts
+    # No intermediate scene shorter than the minimum scene length.
+    video = VideoStreamCv2(test_video_file)
+    min_frames = min_scene_len * video.frame_rate
+    for start, end in multi_scenes[1:-1]:
+        assert (end - start).frame_num >= min_frames
+    # The single-detector result is unaffected by the multi-detector filtering.
+    rerun_cuts, _ = detect([ContentDetector(min_scene_len=min_scene_len)])
+    assert rerun_cuts == single_cuts

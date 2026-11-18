@@ -78,6 +78,17 @@ class SceneDetector(ABC):
         amount of frames a detector might emit an event in the past."""
         return 0
 
+    @property
+    def min_scene_len_filter(self) -> "FlashFilter | None":
+        """A :class:`FlashFilter` representing the minimum scene length this detector enforces
+        between the cuts it emits, or None if the detector does not enforce one.
+
+        Used by :class:`SceneManager <scenedetect.scene_manager.SceneManager>` to enforce the
+        minimum scene length across cuts merged from multiple detectors. Detectors that take
+        a `min_scene_len` argument should override this property.
+        """
+        return None
+
     # Frame Stats/Metrics
 
     @property
@@ -157,6 +168,16 @@ class FlashFilter:
         if self._filter_secs is not None:
             return self._filter_secs <= 0.0
         return self._filter_length <= 0
+
+    def is_min_length_met(self, from_tc: FrameTimecode, to_tc: FrameTimecode) -> bool:
+        """Whether the span from `from_tc` to `to_tc` is at least the filter length.
+
+        Always returns True if the filter is disabled (length <= 0). Does not modify any
+        of the filter's internal state, unlike :meth:`filter`.
+        """
+        if self._is_disabled:
+            return True
+        return self._min_length_met(from_tc, to_tc)
 
     def filter(self, timecode: FrameTimecode, above_threshold: bool) -> list[FrameTimecode]:
         if self._is_disabled:

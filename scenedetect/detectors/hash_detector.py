@@ -20,7 +20,7 @@ import cv2
 import numpy
 
 from scenedetect.common import FrameTimecode, TimecodeLike
-from scenedetect.detector import SceneDetector
+from scenedetect.detector import FlashFilter, SceneDetector
 
 
 class HashDetector(SceneDetector):
@@ -61,6 +61,12 @@ class HashDetector(SceneDetector):
         self._last_scene_cut: FrameTimecode | None = None
         self._last_hash = numpy.array([])
         self._metric_key = f"hash_dist [size={self._size} lowpass={self._factor}]"
+
+    @property
+    def min_scene_len_filter(self) -> FlashFilter:
+        """A :class:`FlashFilter <scenedetect.detector.FlashFilter>` representing the
+        `min_scene_len` this detector enforces between cuts."""
+        return FlashFilter(mode=FlashFilter.Mode.SUPPRESS, length=self._min_scene_len)
 
     def get_metrics(self):
         return [self._metric_key]

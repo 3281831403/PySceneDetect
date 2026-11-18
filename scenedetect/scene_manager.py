@@ -403,7 +403,26 @@ class SceneManager:
         if not self._cutting_list:
             return []
         # Ensure all cuts are unique by using a set to remove all duplicates.
-        return [cut for cut in sorted(set(self._cutting_list))]
+        cuts = [cut for cut in sorted(set(self._cutting_list))]
+        # Each detector enforces its minimum scene length on the cuts it emits, but nothing
+        # stops cuts from *different* detectors from landing closer together than that. When
+        # more than one detector is used, filter the merged cut list so no intermediate scene
+        # is shorter than the effective minimum scene length (the first and last scenes are
+        # exempt, matching how detectors treat the start/end of the video). With a single
+        # detector the cuts are returned exactly as detected.
+        if len(self._detector_list) > 1:
+            filters = [
+                min_scene_len_filter
+                for detector in self._detector_list
+                if (min_scene_len_filter := detector.min_scene_len_filter) is not None
+            ]
+            if filters:
+                merged = [cuts[0]]
+                for cut in cuts[1:]:
+                    if all(f.is_min_length_met(merged[-1], cut) for f in filters):
+                        merged.append(cut)
+                cuts = merged
+        return cuts
 
     def _process_frame(
         self,

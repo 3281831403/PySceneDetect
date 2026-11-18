@@ -23,7 +23,7 @@ from logging import getLogger
 import numpy
 
 from scenedetect.common import FrameTimecode, TimecodeLike
-from scenedetect.detector import SceneDetector
+from scenedetect.detector import FlashFilter, SceneDetector
 
 logger = getLogger("pyscenedetect")
 
@@ -107,6 +107,12 @@ class ThresholdDetector(SceneDetector):
 
     def get_metrics(self) -> list[str]:
         return self._metric_keys
+
+    @property
+    def min_scene_len_filter(self) -> FlashFilter:
+        """A :class:`FlashFilter <scenedetect.detector.FlashFilter>` representing the
+        `min_scene_len` this detector enforces between cuts."""
+        return FlashFilter(mode=FlashFilter.Mode.SUPPRESS, length=self.min_scene_len)
 
     def process_frame(
         self, timecode: FrameTimecode, frame_img: numpy.ndarray
