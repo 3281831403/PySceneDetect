@@ -163,3 +163,50 @@ def test_min_out_length_cli(tmp_path, minimum, use_config):
     with (tmp_path / "scenes.csv").open(newline="") as scene_file:
         scenes = list(csv.DictReader(scene_file))
     assert [int(scene["Start Frame"]) - 1 for scene in scenes] == [0, 25]
+
+
+def test_negative_fade_bias_does_not_create_empty_scene():
+    # A video that starts faded out with fade_bias=-1.0 places the split on the first
+    # frame; that cut would create an empty scene and must be dropped.
+    assert _detect_levels([0] * 10 + [128] * 20, min_scene_len=0, fade_bias=-1.0) == []
+    # Mid-video fades are unaffected: the split still lands on the fade-out frame.
+    assert _detect_levels([128] * 20 + [0] * 10 + [128] * 20, min_scene_len=0, fade_bias=-1.0) == [
+        20
+    ]
+
+
+def test_all_faded_out_video_does_not_create_empty_scene():
+    # A whole-video fade-out starting at frame 0 must not emit a cut at frame 0.
+    assert _detect_levels([0] * 30, min_scene_len=0, add_final_scene=True) == []
+
+
+def test_final_scene_respects_min_scene_len():
+    # Fade-in cut at 20 (fade_bias=+1.0), fade-out at 25: the final cut would end a
+    # 5-frame scene, shorter than min_scene_len=15, so it must be suppressed even
+    # though enough frames pass before the end of the video.
+    levels = [0] * 20 + [128] * 5 + [0] * 25
+    assert _detect_levels(levels, min_scene_len=15, fade_bias=1.0, add_final_scene=True) == [20]
+    # Moving the fade-out far enough away keeps the final cut.
+    levels = [0] * 20 + [128] * 20 + [0] * 10
+    assert _detect_levels(levels, min_scene_len=15, fade_bias=1.0, add_final_scene=True) == [20, 40]
+
+
+def test_final_scene_min_scene_len_anchored_at_emitted_cut():
+    # With fade_bias=-1.0 the emitted cut is the fade-out frame (35), which is earlier
+    # than the fade-in event (40). min_scene_len for the final cut is measured from
+    # the emitted cut, not the fade-in event.
+    levels = [0] * 15 + [128] * 20 + [0] * 5 + [128] * 12 + [0] * 13
+    assert _detect_levels(levels, min_scene_len=15, fade_bias=-1.0, add_final_scene=True) == [
+        35,
+        52,
+    ]
+    levels = [0] * 15 + [128] * 20 + [0] * 5 + [128] * 5 + [0] * 20
+    assert _detect_levels(levels, min_scene_len=15, fade_bias=-1.0, add_final_scene=True) == [35]
+
+
+def test_final_scene_anchored_at_video_start_when_split_dropped():
+    # fade_bias=-1.0 on a video that starts faded out drops the split at frame 0, so no
+    # cut is ever emitted; the final cut's min_scene_len is then measured from the first
+    # frame (the scene start), not the fade-in event at frame 15.
+    levels = [0] * 15 + [128] * 5 + [0] * 20
+    assert _detect_levels(levels, min_scene_len=15, fade_bias=-1.0, add_final_scene=True) == [20]

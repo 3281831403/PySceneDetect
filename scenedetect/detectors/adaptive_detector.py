@@ -115,29 +115,77 @@ class AdaptiveDetector(ContentDetector):
             return []
         self._buffer = self._buffer[-required_frames:]
         (target_timecode, target_score) = self._buffer[self.window_width]
-        average_window_score = sum(
-            score for i, (_frame, score) in enumerate(self._buffer) if i != self.window_width
-        ) / (2.0 * self.window_width)
-
-        average_is_zero = abs(average_window_score) < 0.00001
-
-        adaptive_ratio = 0.0
-        if not average_is_zero:
-            adaptive_ratio = min(target_score / average_window_score, 255.0)
-        elif average_is_zero and target_score >= self.min_content_val:
-            # if we would have divided by zero, set adaptive_ratio to the max (255.0)
-            adaptive_ratio = 255.0
+        adaptive_ratio = self._compute_adaptive_ratio(self._buffer, self.window_width)
         if self.stats_manager is not None:
             self.stats_manager.set_metrics(
                 target_timecode, {self._adaptive_ratio_key: adaptive_ratio}
             )
+        return self._apply_cut_threshold(target_timecode, target_score, adaptive_ratio)
 
+    def post_process(self, timecode: FrameTimecode) -> list[FrameTimecode]:
+        """Evaluate any frames still buffered when the video ends.
+
+        The last `window_width` frames never accumulate a full lookahead window, so they
+        are scored here with the frames that are available (the window falls back to
+        available frames at the end of the video). This ensures cuts near the end of the
+        video are still detected and their `adaptive_ratio` metric is recorded.
+        """
+        cuts: list[FrameTimecode] = []
+        required_frames = 1 + (2 * self.window_width)
+        # With a full buffer, the last `window_width` frames are still unevaluated. If the
+        # buffer never filled (video shorter than the required window), nothing was
+        # evaluated yet, so all buffered frames are pending.
+        first_pending = (
+            len(self._buffer) - self.window_width if len(self._buffer) >= required_frames else 0
+        )
+        for index in range(first_pending, len(self._buffer)):
+            (target_timecode, target_score) = self._buffer[index]
+            adaptive_ratio = self._compute_adaptive_ratio(self._buffer, index)
+            if self.stats_manager is not None:
+                self.stats_manager.set_metrics(
+                    target_timecode, {self._adaptive_ratio_key: adaptive_ratio}
+                )
+            cuts += self._apply_cut_threshold(target_timecode, target_score, adaptive_ratio)
+        return cuts
+
+    def _compute_adaptive_ratio(
+        self, buffer: list[tuple[FrameTimecode, float]], target_index: int
+    ) -> float:
+        """Compute the adaptive ratio for the buffered frame at `target_index`, averaging
+        the scores of the frames within `window_width` of it that are available in
+        `buffer` (the window is truncated at the ends of the buffer)."""
+        (_, target_score) = buffer[target_index]
+        window_scores = [
+            score
+            for index, (_, score) in enumerate(buffer)
+            if index != target_index and abs(index - target_index) <= self.window_width
+        ]
+        average_window_score = (
+            sum(window_scores) / float(len(window_scores)) if window_scores else 0.0
+        )
+
+        average_is_zero = abs(average_window_score) < 0.00001
+
+        if not average_is_zero:
+            return min(target_score / average_window_score, 255.0)
+        if target_score >= self.min_content_val:
+            # if we would have divided by zero, set adaptive_ratio to the max (255.0)
+            return 255.0
+        return 0.0
+
+    def _apply_cut_threshold(
+        self, target_timecode: FrameTimecode, target_score: float, adaptive_ratio: float
+    ) -> list[FrameTimecode]:
+        """Emit a cut at `target_timecode` if the adaptive ratio and content value both
+        exceed their thresholds, and `min_scene_len` has passed since the last cut."""
         # Check to see if adaptive_ratio exceeds the adaptive_threshold as well as there
         # being a large enough content_val to trigger a cut
         threshold_met: bool = (
             adaptive_ratio >= self.adaptive_threshold and target_score >= self.min_content_val
         )
         # Cuts are emitted at `target_timecode` (`window_width` behind `timecode`).
+        # `_last_cut` is always set before any frame is buffered in process_frame.
+        assert self._last_cut is not None
         min_length_met: bool = (target_timecode - self._last_cut) >= self.min_scene_len
         if threshold_met and min_length_met:
             self._last_cut = target_timecode

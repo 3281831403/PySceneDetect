@@ -292,3 +292,55 @@ def test_adaptive_detector_min_scene_len_uses_target_frame():
 
     cut_frames = [cut.frame_num for cut in cuts]
     assert cut_frames == [100, 140]
+
+
+def test_adaptive_detector_post_process_evaluates_remaining_window():
+    """Frames still in the window buffer when the input ends are evaluated with the
+    frames available, so a cut near the end of the video is still detected and its
+    adaptive_ratio metric is recorded."""
+    stats = StatsManager()
+    detector = AdaptiveDetector(
+        adaptive_threshold=3.0,
+        min_scene_len=0,
+        window_width=2,
+        min_content_val=15.0,
+        luma_only=True,
+    )
+    detector.stats_manager = stats
+    fps = 30.0
+    num_frames = 60
+    cut_frame = num_frames - 2  # Hard cut within the final `window_width` frames.
+    cuts = []
+    for frame_num in range(num_frames):
+        value = 255 if frame_num >= cut_frame else 0
+        frame = np.full((16, 16, 3), value, dtype=np.uint8)
+        cuts.extend(detector.process_frame(FrameTimecode(frame_num, fps), frame))
+    # The cut frame is still in the window buffer, so no cuts are emitted yet.
+    assert cuts == []
+    cuts.extend(detector.post_process(FrameTimecode(num_frames - 1, fps)))
+    assert [cut.frame_num for cut in cuts] == [cut_frame]
+    # The adaptive_ratio metric is recorded for the flushed frames as well.
+    metric = AdaptiveDetector.ADAPTIVE_RATIO_KEY_TEMPLATE.format(window_width=2, luma_only="_lum")
+    for frame_num in range(num_frames - 2, num_frames):
+        assert stats.metrics_exist(FrameTimecode(frame_num, fps), [metric])
+
+
+def test_adaptive_detector_post_process_short_video():
+    """A video shorter than the full window is evaluated entirely in post_process,
+    with the window falling back to the available frames at both ends."""
+    detector = AdaptiveDetector(
+        adaptive_threshold=3.0,
+        min_scene_len=0,
+        window_width=2,
+        min_content_val=15.0,
+        luma_only=True,
+    )
+    fps = 30.0
+    frames = [0, 0, 255, 0]  # Hard cut at frame 2, video shorter than 1 + 2 * window_width.
+    cuts = []
+    for frame_num, value in enumerate(frames):
+        frame = np.full((16, 16, 3), value, dtype=np.uint8)
+        cuts.extend(detector.process_frame(FrameTimecode(frame_num, fps), frame))
+    assert cuts == []
+    cuts.extend(detector.post_process(FrameTimecode(len(frames) - 1, fps)))
+    assert [cut.frame_num for cut in cuts] == [2]

@@ -95,6 +95,12 @@ class ThresholdDetector(SceneDetector):
         self.min_out_length = min_out_length
         self.processed_frame = False
         self.last_scene_cut: FrameTimecode | None = None
+        # Position of the last cut actually emitted by process_frame. This can be earlier
+        # than `last_scene_cut` (which tracks the fade-in event itself) when fade_bias < 1,
+        # and is used to enforce min_scene_len on cuts emitted by post_process.
+        self._last_emitted_cut: FrameTimecode | None = None
+        # The first frame that was processed, i.e. where the first scene starts.
+        self._start_frame: FrameTimecode | None = None
         # Whether to add an additional scene or not when ending on a fade out
         # (as cuts are only added on fade ins; see post_process() for details).
         self.add_final_scene = add_final_scene
@@ -123,6 +129,8 @@ class ThresholdDetector(SceneDetector):
         # Initialize last scene cut point at the beginning of the frames of interest.
         if self.last_scene_cut is None:
             self.last_scene_cut = timecode
+        if self._start_frame is None:
+            self._start_frame = timecode
 
         cuts: list[FrameTimecode] = []
 
@@ -167,7 +175,14 @@ class ThresholdDetector(SceneDetector):
                     split_frame_num = f_out.frame_num + round(
                         duration_frames * (1.0 + self.fade_bias) / 2.0
                     )
-                    cuts.append(FrameTimecode(split_frame_num, fps=timecode))
+                    # A split at/before the current scene's start would create an empty
+                    # scene (e.g. with fade_bias=-1.0 when the video starts faded out, the
+                    # split lands on the very first frame). Such cuts carry no information,
+                    # so they are dropped; the scene simply starts at the first frame.
+                    if split_frame_num > self.last_scene_cut.frame_num:
+                        cut = FrameTimecode(split_frame_num, fps=timecode)
+                        cuts.append(cut)
+                        self._last_emitted_cut = cut
                     self.last_scene_cut = timecode
                 self.last_fade["type"] = "in"
                 self.last_fade["frame"] = timecode
@@ -189,21 +204,37 @@ class ThresholdDetector(SceneDetector):
         that was detected was a fade-out.  There is no bias applied to this cut
         (since there is no corresponding fade-in) so it will be located at the
         exact frame where the fade-out crossed the detection threshold. The fade-out
-        must also meet min_out_length, including the last processed frame.
+        must also meet min_out_length, including the last processed frame. Like cuts
+        emitted during processing, the cut must satisfy min_scene_len with respect to
+        the scene it ends, and must not create an empty scene.
         """
 
         # If the last fade detected was a fade out, we add a corresponding new
         # scene break to indicate the end of the scene.  This is only done for
         # fade-outs, as a scene cut is already added when a fade-in is found.
         cuts: list[FrameTimecode] = []
-        elapsed = timecode if self.last_scene_cut is None else timecode - self.last_scene_cut
-        if (
+        if not (
             self.last_fade["type"] == "out"
             and self.add_final_scene
             and self.last_fade["frame"] is not None
-            and elapsed >= self.min_scene_len
-            # timecode is the last processed frame, so include it in the fade duration.
-            and (timecode + 1 - self.last_fade["frame"]) >= self.min_out_length
         ):
-            cuts.append(self.last_fade["frame"])
+            return cuts
+        cut: FrameTimecode = self.last_fade["frame"]
+        # The scene this cut would end started at the last emitted cut, or at the first
+        # processed frame if no cuts were emitted yet. (`last_scene_cut` is not suitable
+        # here: it tracks the fade-in event itself, which is later than the emitted cut
+        # when fade_bias < 1, and is updated even when a split is dropped.)
+        scene_start = (
+            self._last_emitted_cut if self._last_emitted_cut is not None else self._start_frame
+        )
+        if (
+            scene_start is not None
+            # The cut must lie within the scene it ends, otherwise the scene would be
+            # empty (e.g. the whole video is a single fade-out starting at frame 0).
+            and cut > scene_start
+            and (cut - scene_start) >= self.min_scene_len
+            # timecode is the last processed frame, so include it in the fade duration.
+            and (timecode + 1 - cut) >= self.min_out_length
+        ):
+            cuts.append(cut)
         return cuts

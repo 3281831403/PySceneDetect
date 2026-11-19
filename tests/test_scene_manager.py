@@ -17,9 +17,10 @@ which applies SceneDetector algorithms on VideoStream backends.
 
 import pytest
 
+from scenedetect import StatsManager, open_video
 from scenedetect.backends.opencv import VideoStreamCv2
 from scenedetect.common import FrameTimecode
-from scenedetect.detectors import AdaptiveDetector, ContentDetector
+from scenedetect.detectors import AdaptiveDetector, ContentDetector, ThresholdDetector
 from scenedetect.scene_manager import SceneManager, expand_scenes_to_bounds
 
 TEST_VIDEO_START_FRAMES_ACTUAL = [150, 180, 394]
@@ -261,3 +262,49 @@ def test_expand_scenes_to_bounds_does_not_mutate_input():
     expand_scenes_to_bounds(scenes, start=t0, end=t300)
 
     assert scenes == original
+
+
+def test_detect_scenes_callback_threshold(test_fades_clip, auto_close):
+    """The detect_scenes callback must fire once per cut with the cut's timecode, including
+    cuts reported after their frame was evicted from the frame buffer (fade_bias < 1.0)
+    and cuts supplemented by the detector's post_process (add_final_scene)."""
+
+    def detect_with_callback(fade_bias: float) -> tuple[list[int], list[int]]:
+        video = auto_close(open_video(test_fades_clip))
+        sm = SceneManager()
+        sm.add_detector(ThresholdDetector(fade_bias=fade_bias, add_final_scene=True))
+        callback_frames = []
+
+        def callback(image, timecode):
+            assert image is not None
+            callback_frames.append(timecode.frame_num)
+
+        sm.detect_scenes(video=video, callback=callback)
+        cut_frames = [cut.frame_num for cut in sm.get_cut_list(show_warning=False)]
+        return callback_frames, cut_frames
+
+    for fade_bias in (-1.0, 0.0, 1.0):
+        callback_frames, cut_frames = detect_with_callback(fade_bias)
+        assert cut_frames, "expected cuts to be detected on the fades test clip"
+        assert callback_frames == cut_frames
+
+
+def test_detect_scenes_adaptive_cut_near_end(test_video_file, auto_close):
+    """A hard cut within `window_width` frames of the end of the detection window must
+    still be detected by AdaptiveDetector (matching ContentDetector), and the trailing
+    frames must have their adaptive_ratio metric recorded."""
+    end_time = 13.2  # Truncates two frames after a hard cut.
+    stats = StatsManager()
+    video = auto_close(open_video(test_video_file))
+    sm = SceneManager(stats_manager=stats)
+    sm.add_detector(AdaptiveDetector())
+    sm.detect_scenes(video=video, end_time=end_time)
+    scene_list = sm.get_scene_list()
+    assert [start.frame_num for start, _ in scene_list] == [0, 30, 180, 394]
+    # The final scene is the two frames following the hard cut at frame 394.
+    assert scene_list[-1][1].frame_num - scene_list[-1][0].frame_num == 2
+    # The adaptive_ratio metric must exist for the trailing frames as well.
+    metric = AdaptiveDetector.ADAPTIVE_RATIO_KEY_TEMPLATE.format(window_width=2, luma_only="")
+    last_frame = video.position.frame_num
+    for frame_num in (last_frame - 1, last_frame):
+        assert stats.metrics_exist(FrameTimecode(frame_num, video.frame_rate), [metric])

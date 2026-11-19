@@ -427,15 +427,38 @@ class SceneManager:
             new_cuts = bool(cuts)
             if callback:
                 for cut in cuts:
-                    for position, frame in self._frame_buffer:
-                        if cut == position:
-                            callback(frame, position)
+                    self._invoke_callback(callback, cut)
         return new_cuts
 
-    def _post_process(self, timecode: FrameTimecode) -> None:
+    def _invoke_callback(
+        self, callback: ty.Callable[[np.ndarray, FrameTimecode], None], cut: FrameTimecode
+    ) -> None:
+        """Invoke `callback` for a detected cut.
+
+        The callback is always invoked with the cut's own timecode. The frame image is the
+        cut's frame if it is still in the frame buffer; detectors may report cuts for frames
+        that were already evicted from the buffer (e.g. `ThresholdDetector` with a negative
+        `fade_bias`), in which case the closest available frame is used instead.
+        """
+        if not self._frame_buffer:
+            return
+        (_position, frame) = min(
+            self._frame_buffer, key=lambda buffered: abs(buffered[0].frame_num - cut.frame_num)
+        )
+        callback(frame, cut)
+
+    def _post_process(
+        self,
+        timecode: FrameTimecode,
+        callback: ty.Callable[[np.ndarray, FrameTimecode], None] | None = None,
+    ) -> None:
         """Add remaining cuts to the cutting list, after processing the last frame."""
         for detector in self._detector_list:
-            self._cutting_list += detector.post_process(timecode)
+            cuts = detector.post_process(timecode)
+            self._cutting_list += cuts
+            if callback:
+                for cut in cuts:
+                    self._invoke_callback(callback, cut)
 
     def stop(self) -> None:
         """Stop the current :meth:`detect_scenes` call, if any. Thread-safe."""
@@ -473,7 +496,11 @@ class SceneManager:
             show_progress: If True, and the ``tqdm`` module is available, displays
                 a progress bar with the progress, framerate, and expected time to
                 complete processing the video frame source.
-            callback: If set, called after each scene/event detected.
+            callback: If set, called after each scene/event detected. Invoked once per cut
+                with the cut's timecode, including cuts reported after the fact (e.g. by
+                `ThresholdDetector` with `fade_bias` < 1, or from a detector's
+                `post_process`). The frame image is the cut's frame when still buffered,
+                otherwise the closest available frame is passed.
             frame_source: [DEPRECATED] DO NOT USE. For compatibility with previous version.
                 :meta private:
         Returns:
@@ -616,7 +643,7 @@ class SceneManager:
             raise exc.with_traceback(self._exception_info[2])
 
         self._last_pos = video.position
-        self._post_process(video.position)
+        self._post_process(video.position, callback)
 
         return video.frame_number - start_frame_num
 
