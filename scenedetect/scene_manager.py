@@ -628,6 +628,7 @@ class SceneManager:
         end_time: FrameTimecode,
         out_queue: queue.Queue,
     ):
+        vfr = False
         try:
             while not self._stop.is_set():
                 frame_im = None
@@ -679,6 +680,18 @@ class SceneManager:
                 if self._start_pos is None:
                     self._start_pos = video.position
 
+                # For VFR sources the frame number is the exact decode-order index, which
+                # `end_time` cannot express (it was derived from a number of seconds at the
+                # average framerate), so compare presentation times instead: stop before
+                # queueing a frame that begins at or after the end time. VFR is detected as
+                # soon as a frame's decode-order index disagrees with the estimate derived from
+                # its presentation time. CFR sources keep the frame-number comparison below.
+                if end_time is not None:
+                    if not vfr and video.position.is_vfr:
+                        vfr = True
+                    if vfr and not (video.position.seconds < end_time.seconds):
+                        break
+
                 out_queue.put((frame_im, video.position))
 
                 if frame_skip > 0:
@@ -687,7 +700,7 @@ class SceneManager:
                             break
                 # End time includes the presentation time of the frame, but the `position`
                 # property of a VideoStream references the beginning of the frame in time.
-                if end_time is not None and not (video.position + 1) < end_time:
+                if end_time is not None and not vfr and not (video.position + 1) < end_time:
                     break
 
         # If *any* exceptions occur, we re-raise them in the main thread so that the caller of

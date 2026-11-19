@@ -249,7 +249,19 @@ class VideoStreamCv2(VideoStream):
             return self._eof_timecode
         ms = self._cap.get(cv2.CAP_PROP_POS_MSEC)
         time_base = Fraction(1, 1000000)
-        return Timecode(pts=round(ms * 1000), time_base=time_base)
+        return Timecode(
+            pts=round(ms * 1000), time_base=time_base, frame_number=self._decode_index()
+        )
+
+    def _decode_index(self) -> int | None:
+        """Decode-order index (0-based) of the current frame, or None if the backend does not
+        report a usable frame position (e.g. some devices). For VFR sources this is the only
+        reliable frame identity: frame numbers derived from presentation times via the average
+        framerate can collide or go non-monotonic."""
+        pos_frames = self._cap.get(cv2.CAP_PROP_POS_FRAMES)
+        if math.isfinite(pos_frames) and pos_frames >= 1.0:
+            return math.trunc(pos_frames) - 1
+        return None
 
     @property
     def position(self) -> FrameTimecode:
@@ -261,7 +273,9 @@ class VideoStreamCv2(VideoStream):
             fps = self.frame_rate
             time_base = Fraction(1, fps.numerator)
             pts = (self.frame_number - 1) * fps.denominator
-            timecode = Timecode(pts=pts, time_base=time_base)
+            timecode = Timecode(
+                pts=pts, time_base=time_base, frame_number=self.frame_number - 1
+            )
         return FrameTimecode(timecode=timecode, fps=self.frame_rate)
 
     @property

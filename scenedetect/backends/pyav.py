@@ -27,6 +27,7 @@ from scenedetect.common import (
     FrameTimecode,
     Timecode,
     TimecodeLike,
+    _FrameNumber,
     framerate_to_fraction,
 )
 from scenedetect.platform import StrPath, get_file_name
@@ -67,6 +68,17 @@ def _to_fraction(value) -> Fraction:
     """PyAV >= 19.0 returns `av.AVRational` for time bases and frame rates. The backend must
     convert to `Fraction` so downstream arithmetic works correctly."""
     return Fraction(value.numerator, value.denominator)
+
+
+def _exact_frame_number(timecode: FrameTimecode) -> int | None:
+    """The exact frame number a :class:`FrameTimecode` identifies, or None if it only carries an
+    approximate time (e.g. it was created from a number of seconds)."""
+    inner = timecode._time
+    if isinstance(inner, Timecode):
+        return inner.frame_number
+    if isinstance(inner, _FrameNumber):
+        return inner.value
+    return None
 
 
 class VideoStreamAv(VideoStream):
@@ -153,6 +165,13 @@ class VideoStreamAv(VideoStream):
         # 1-based count of frames decoded in the current stream pass, used to estimate the position
         # of frames without timestamps and for diagnostic logging.
         self._frames_decoded = 0
+        # True while `_frames_decoded` reflects an exact count from decoding in order from the
+        # start of the stream, so it can be attached to the position as a decode-order frame
+        # number. Cleared by `seek()`: frames decoded forward from a keyframe are counted, but
+        # without knowing how many frames precede the keyframe the count is not the frame's
+        # index within the stream. It is restored once a seek walks forward from the start, or
+        # when a frame's position is established relative to the stream start.
+        self._decode_index_valid = True
         # True if `_io` was opened by this object (from a path) and must be closed in `close()`.
         # Set before anything below can raise so a partially constructed object is safe to finalize.
         self._owns_io = False
@@ -374,6 +393,10 @@ class VideoStreamAv(VideoStream):
         if not self.is_seekable:
             raise SeekError("Stream is not seekable.")
         beginning = target == 0
+        # The frame index the caller asked for, if the target identifies one exactly (a frame
+        # number or a decode-order index). A target given in seconds is only approximate for
+        # VFR sources and is not tracked as an exact index.
+        requested_frame = _exact_frame_number(target)
 
         target = self.base_timecode + target
         if target >= 1:
@@ -420,8 +443,10 @@ class VideoStreamAv(VideoStream):
         self._decoder = None
         self._timecode = None
         # Seed `_frames_decoded` with the target frame before walking forward from the keyframe,
-        # then sync it to `self.frame_number` once the walk completes.
+        # then sync it to `self.frame_number` once the walk completes. Until then the count does
+        # not correspond to a frame's index within the stream, so no frame number is attached.
         self._frames_decoded = target.frame_num
+        self._decode_index_valid = False
         # The demuxer normally lands on a keyframe at or before `target_pts`, but the frames
         # decoded from there may lack timestamps, in which case their position is unknown.
         # Read until a frame carries one to establish where we landed, leaving the position
@@ -456,6 +481,22 @@ class VideoStreamAv(VideoStream):
             if self.read(decode=False) is False:
                 break
         self._frames_decoded = self.frame_number
+        # `seek()` leaves the stream on the frame before the target. When the target identified
+        # that frame exactly, its decode-order index is known from the request even though we
+        # did not decode from the start of the stream, so attach it to the position.
+        if (
+            requested_frame is not None
+            and requested_frame >= 1
+            and self._timecode is not None
+            and self._frames_decoded == requested_frame
+        ):
+            self._decode_index_valid = True
+            self._timecode = Timecode(
+                pts=self._timecode.pts,
+                time_base=self._timecode.time_base,
+                frame_number=requested_frame - 1,
+            )
+            self._frames_decoded = requested_frame
 
     def reset(self):
         """Close and re-open the VideoStream (should be equivalent to calling `seek(0)`)."""
@@ -615,7 +656,11 @@ class VideoStreamAv(VideoStream):
         if offset and self._offset_time_base != time_base:
             assert self._offset_time_base is not None
             offset = int(offset * self._offset_time_base / time_base)
-        timecode = Timecode(pts=timestamp - offset, time_base=time_base)
+        timecode = Timecode(
+            pts=timestamp - offset,
+            time_base=time_base,
+            frame_number=max(self._frames_decoded - 1, 0) if self._decode_index_valid else None,
+        )
         # Compare against the last reported position, including estimated ones, since that is
         # what callers see go backwards.
         previous = self._timecode
@@ -641,11 +686,17 @@ class VideoStreamAv(VideoStream):
         """The position we think the next frame should be at. Use only if we get a frame without a
         timestamp. Calculated as one (nominal) frame period from the previous frame's position, or
         as the frame count in nominal frame periods if there is no previous position."""
+        count = max(self._frames_decoded - 1, 0)
+        frame_number = count if self._decode_index_valid else None
         previous = self._timecode
         if previous is None:
-            return Timecode(pts=max(self._frames_decoded - 1, 0), time_base=1 / self.frame_rate)
+            return Timecode(
+                pts=count, time_base=1 / self.frame_rate, frame_number=frame_number
+            )
         return Timecode(
-            pts=previous.pts + self._frame_period(previous.time_base), time_base=previous.time_base
+            pts=previous.pts + self._frame_period(previous.time_base),
+            time_base=previous.time_base,
+            frame_number=frame_number,
         )
 
     def _frame_period(self, time_base: Fraction) -> int:

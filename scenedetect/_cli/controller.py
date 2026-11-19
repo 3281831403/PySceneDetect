@@ -16,10 +16,11 @@ import logging
 import os
 import time
 import warnings
+from fractions import Fraction
 
 from scenedetect._cli.context import CliContext
 from scenedetect.backends import VideoStreamCv2, VideoStreamMoviePy
-from scenedetect.common import FrameTimecode
+from scenedetect.common import FrameTimecode, Timecode
 from scenedetect.platform import get_and_create_path
 from scenedetect.scene_manager import CutList, SceneList, get_scenes_from_cuts
 from scenedetect.video_stream import SeekError
@@ -202,6 +203,7 @@ def _load_scenes(context: CliContext) -> tuple[SceneList, CutList]:
         if context.load_scenes_column_name not in csv_headers:
             raise ValueError("specified column header for scene start is not present")
         col_idx = csv_headers.index(context.load_scenes_column_name)
+        rows = [row for row in file_reader if row]
 
         def calculate_timecode(value: str) -> FrameTimecode:
             # Assume other columns are in seconds except frame numbers.
@@ -210,7 +212,51 @@ def _load_scenes(context: CliContext) -> tuple[SceneList, CutList]:
                 return FrameTimecode(int(value) - 1, fps=video_stream.frame_rate)
             return FrameTimecode(value, fps=video_stream.frame_rate)
 
-        cut_list = sorted(calculate_timecode(row[col_idx]) for row in file_reader)
+        # For VFR sources, frame numbers and timecodes are independent ledgers: the frame
+        # number is the decode-order index and cannot be recovered from the timecode (or
+        # vice versa) via the average framerate. When both the frame number and timecode
+        # columns are present and disagree with the framerate-derived estimate, reconstruct
+        # positions carrying both so a list-scenes round-trip is byte-identical. CFR input
+        # always agrees with the estimate and stays on the original code path.
+        frame_col = csv_headers.index("Start Frame") if "Start Frame" in csv_headers else None
+        timecode_col = (
+            csv_headers.index("Start Timecode") if "Start Timecode" in csv_headers else None
+        )
+        end_frame_col = csv_headers.index("End Frame") if "End Frame" in csv_headers else None
+        end_timecode_col = (
+            csv_headers.index("End Timecode") if "End Timecode" in csv_headers else None
+        )
+        is_vfr = False
+        if frame_col is not None and timecode_col is not None:
+            frame_rate = float(video_stream.frame_rate)
+            is_vfr = any(
+                round(
+                    FrameTimecode(row[timecode_col], fps=video_stream.frame_rate).seconds
+                    * frame_rate
+                )
+                != int(row[frame_col]) - 1
+                for row in rows
+            )
+
+        if is_vfr:
+            millisecond = Fraction(1, 1000)
+
+            def parse_position(frame_number: int, timecode: str) -> FrameTimecode:
+                seconds = FrameTimecode(timecode, fps=video_stream.frame_rate).seconds
+                return FrameTimecode(
+                    timecode=Timecode(
+                        pts=round(seconds * 1000),
+                        time_base=millisecond,
+                        frame_number=frame_number,
+                    ),
+                    fps=video_stream.frame_rate,
+                )
+
+            cut_list = sorted(
+                parse_position(int(row[frame_col]) - 1, row[timecode_col]) for row in rows
+            )
+        else:
+            cut_list = sorted(calculate_timecode(row[col_idx]) for row in rows)
         # `SceneDetector` works on cuts, so we have to skip the first scene and place the first
         # cut point where the next scenes starts.
         if cut_list:
@@ -224,6 +270,12 @@ def _load_scenes(context: CliContext) -> tuple[SceneList, CutList]:
         video_duration = context.video_stream.duration
         assert video_duration is not None
         end_time = video_duration
+        if is_vfr and end_frame_col is not None and end_timecode_col is not None and rows:
+            # The CSV records the exact end of the last scene; reconstruct it the same way
+            # as the cuts so the final scene round-trips identically.
+            csv_end = parse_position(int(rows[-1][end_frame_col]), rows[-1][end_timecode_col])
+            if csv_end <= video_duration:
+                end_time = csv_end
         if context.end_time is not None:
             end_time = min(context.end_time, video_duration)
         elif context.duration is not None:

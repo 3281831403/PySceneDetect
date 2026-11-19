@@ -173,6 +173,13 @@ class Timecode:
     """Presentation timestamp of the frame in units of `time_base`."""
     time_base: Fraction
     """The base unit in which `pts` is measured."""
+    frame_number: int | None = None
+    """Exact decode-order frame index (0-based) this timestamp belongs to, if known.
+
+    For VFR sources the presentation time does not map to a unique frame number via the
+    average framerate, so backends attach the decode-order index here to give each frame a
+    unique, monotonically increasing identity. For CFR sources it equals the frame number
+    derived from `pts * frame_rate`."""
 
     def __post_init__(self):
         # Accept any rational (e.g. `av.AVRational` from PyAV 19+) but always store a `Fraction`
@@ -200,6 +207,28 @@ class _Seconds:
     """Represents a time in seconds."""
 
     value: float
+
+
+def _exact_frames_of(timecode: "TimecodeLike") -> "int | None":
+    """The exact frame count/index carried by `timecode` for frame-number propagation
+    through arithmetic, or None if it only carries an approximate time."""
+    if isinstance(timecode, int):
+        return timecode
+    if isinstance(timecode, FrameTimecode):
+        if isinstance(timecode._time, _FrameNumber):
+            return timecode._time.value
+        if isinstance(timecode._time, Timecode):
+            return timecode._time.frame_number
+    return None
+
+
+def _add_frame_numbers(a: "int | None", b: "int | None") -> "int | None":
+    """Combine exact decode-order frame numbers through arithmetic, remaining exact only
+    when both operands are exact. Clamps to 0 to mirror the pts clamping done by
+    :class:`FrameTimecode` arithmetic."""
+    if a is None or b is None:
+        return None
+    return max(0, a + b)
 
 
 class FrameTimecode:
@@ -279,9 +308,13 @@ class FrameTimecode:
 
     @property
     def frame_num(self) -> int:
-        """The frame number. For VFR video or Timecode-backed objects, this is an approximation
+        """The frame number. For VFR video or Timecode-backed objects without an exact
+        decode-order frame number (:attr:`Timecode.frame_number`), this is an approximation
         based on the average framerate. Prefer using `pts` and `time_base` for precise timing."""
         if isinstance(self._time, Timecode):
+            # An exact decode-order frame number always wins over the estimate.
+            if self._time.frame_number is not None:
+                return self._time.frame_number
             # Calculate approximate frame number from seconds and framerate.
             if self._rate is not None:
                 return round(self._time.seconds * float(self._rate))
@@ -290,6 +323,21 @@ class FrameTimecode:
         if isinstance(self._time, _Seconds):
             return self._seconds_to_frames(self._time.value)
         return self._time.value
+
+    @property
+    def is_vfr(self) -> bool:
+        """True if this timecode carries an exact decode-order frame number that disagrees
+        with the frame number estimated from its presentation time and framerate, which
+        indicates the source has a variable framerate (VFR).
+
+        Always False for CFR sources, where the decode-order index and the estimate derived
+        from the average framerate coincide."""
+        if not isinstance(self._time, Timecode) or self._rate is None:
+            return False
+        frame_number = self._time.frame_number
+        if frame_number is None:
+            return False
+        return frame_number != round(self._time.seconds * float(self._rate))
 
     @property
     def frame_rate(self) -> Fraction | None:
@@ -665,17 +713,25 @@ class FrameTimecode:
             other_inner = None
 
         if isinstance(self._time, Timecode) and isinstance(other_inner, Timecode):
+            frame_number = _add_frame_numbers(
+                self._time.frame_number, other_inner.frame_number
+            )
             if self._time.time_base == other_inner.time_base:
                 self._time = Timecode(
                     pts=max(0, self._time.pts + other_inner.pts),
                     time_base=self._time.time_base,
+                    frame_number=frame_number,
                 )
                 return self
             # Different time bases: use the finer (smaller) one for better precision.
             time_base = min(self._time.time_base, other_inner.time_base)
             self_pts = round(Fraction(self._time.pts) * self._time.time_base / time_base)
             other_pts = round(Fraction(other_inner.pts) * other_inner.time_base / time_base)
-            self._time = Timecode(pts=max(0, self_pts + other_pts), time_base=time_base)
+            self._time = Timecode(
+                pts=max(0, self_pts + other_pts),
+                time_base=time_base,
+                frame_number=frame_number,
+            )
             return self
 
         # If either input is a timecode, the output shall also be one. The input which isn't a
@@ -685,6 +741,9 @@ class FrameTimecode:
             self._time = Timecode(
                 pts=max(0, self._time.pts + round(seconds / self._time.time_base)),
                 time_base=self._time.time_base,
+                frame_number=_add_frame_numbers(
+                    self._time.frame_number, _exact_frames_of(other)
+                ),
             )
             if self._rate is None and isinstance(other, FrameTimecode):
                 self._rate = other._rate
@@ -693,6 +752,9 @@ class FrameTimecode:
             self._time = Timecode(
                 pts=max(0, other_inner.pts + round(self.seconds / other_inner.time_base)),
                 time_base=other_inner.time_base,
+                frame_number=_add_frame_numbers(
+                    _exact_frames_of(self), other_inner.frame_number
+                ),
             )
             if self._rate is None and isinstance(other, FrameTimecode):
                 self._rate = other._rate
@@ -725,26 +787,40 @@ class FrameTimecode:
             other_inner = None
 
         if isinstance(self._time, Timecode) and isinstance(other_inner, Timecode):
+            frame_number = _add_frame_numbers(
+                self._time.frame_number,
+                None if other_inner.frame_number is None else -other_inner.frame_number,
+            )
             if self._time.time_base == other_inner.time_base:
                 self._time = Timecode(
                     pts=max(0, self._time.pts - other_inner.pts),
                     time_base=self._time.time_base,
+                    frame_number=frame_number,
                 )
                 return self
             # Different time bases: use the finer (smaller) one for better precision.
             time_base = min(self._time.time_base, other_inner.time_base)
             self_pts = round(Fraction(self._time.pts) * self._time.time_base / time_base)
             other_pts = round(Fraction(other_inner.pts) * other_inner.time_base / time_base)
-            self._time = Timecode(pts=max(0, self_pts - other_pts), time_base=time_base)
+            self._time = Timecode(
+                pts=max(0, self_pts - other_pts),
+                time_base=time_base,
+                frame_number=frame_number,
+            )
             return self
 
         # If either input is a timecode, the output shall also be one. The input which isn't a
         # timecode is converted into seconds, after which the equivalent timecode is computed.
         if isinstance(self._time, Timecode):
             seconds = self._get_other_as_seconds(other)
+            other_frames = _exact_frames_of(other)
             self._time = Timecode(
                 pts=max(0, self._time.pts - round(seconds / self._time.time_base)),
                 time_base=self._time.time_base,
+                frame_number=_add_frame_numbers(
+                    self._time.frame_number,
+                    None if other_frames is None else -other_frames,
+                ),
             )
             if self._rate is None and isinstance(other, FrameTimecode):
                 self._rate = other._rate
@@ -752,9 +828,14 @@ class FrameTimecode:
         if isinstance(other_inner, Timecode):
             # Compute `self - other` in `other`'s time base.
             self_pts_in_other_base = round(self.seconds / other_inner.time_base)
+            self_frames = _exact_frames_of(self)
             self._time = Timecode(
                 pts=max(0, self_pts_in_other_base - other_inner.pts),
                 time_base=other_inner.time_base,
+                frame_number=_add_frame_numbers(
+                    self_frames,
+                    None if other_inner.frame_number is None else -other_inner.frame_number,
+                ),
             )
             if self._rate is None and isinstance(other, FrameTimecode):
                 self._rate = other._rate
@@ -857,6 +938,12 @@ def _compare_as_exact(other: ty.Any, base: FrameTimecode) -> "tuple[Fraction, Fr
         and isinstance(other._time, Timecode)
         and base._rate == other._rate
     ):
+        # Frames with different decode-order indices are never the same position, even if
+        # their presentation times coincide (e.g. duplicate PTS in a corrupt stream).
+        base_frame = base._time.frame_number
+        other_frame = other._time.frame_number
+        if base_frame is not None and other_frame is not None and base_frame != other_frame:
+            return None
         return (
             base._time.pts * base._time.time_base,
             other._time.pts * other._time.time_base,

@@ -41,6 +41,7 @@ from scenedetect.common import (
     CutList,
     FrameTimecode,
     SceneList,
+    Timecode,
     framerate_to_fraction,
 )
 
@@ -193,8 +194,23 @@ def write_scene_list(
             "Length (seconds)",
         ]
     )
+    # For VFR sources, scene durations are derived from the millisecond-quantized endpoint
+    # values that `load-scenes` reconstructs when parsing this CSV back in. This keeps a
+    # list-scenes -> load-scenes -> list-scenes round-trip byte-identical; CFR output is
+    # computed from the exact positions as before.
+    vfr = any(position.is_vfr for start, end in scene_list for position in (start, end))
     for i, (start, end) in enumerate(scene_list):
         duration = end - start
+        if vfr:
+            length_ms = _roundtrip_milliseconds(end) - _roundtrip_milliseconds(start)
+            length_timecode = FrameTimecode(
+                timecode=Timecode(pts=length_ms, time_base=Fraction(1, 1000)),
+                fps=start.frame_rate,
+            )
+            length_seconds = length_ms / 1000
+        else:
+            length_timecode = duration
+            length_seconds = duration.seconds
         csv_writer.writerow(
             [
                 f"{i + 1:d}",
@@ -205,10 +221,17 @@ def write_scene_list(
                 end.get_timecode(),
                 f"{end.seconds:.3f}",
                 f"{duration.frame_num:d}",
-                duration.get_timecode(),
-                f"{duration.seconds:.3f}",
+                length_timecode.get_timecode(),
+                f"{length_seconds:.3f}",
             ]
         )
+
+
+def _roundtrip_milliseconds(position: FrameTimecode) -> int:
+    """Whole milliseconds of `position` as reconstructed by `load-scenes` when parsing a
+    scene list CSV back in (i.e. the formatted timecode parsed again)."""
+    seconds = FrameTimecode(position.get_timecode(), fps=position.frame_rate).seconds
+    return round(seconds * 1000)
 
 
 def write_scene_list_html(
