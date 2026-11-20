@@ -208,6 +208,21 @@ def get_scenes_from_cuts(
     return scene_list
 
 
+def get_cuts_from_scenes(scene_list: SceneList) -> CutList:
+    """Returns the internal boundaries of `scene_list`: the start time of every scene except
+    the first.
+
+    This is the inverse of :func:`get_scenes_from_cuts` for contiguous scene lists, and is used
+    to ensure cut-based outputs match the final scene list after post-processing (e.g.
+    --drop-short-scenes or --merge-last-scene). Returns an empty cut list for an empty scene
+    list or a single scene.
+
+    Arguments:
+        scene_list: List of (start time, end time) FrameTimecode pairs denoting each scene.
+    """
+    return [start for start, _ in scene_list[1:]]
+
+
 ##
 ## SceneManager Class Implementation
 ##

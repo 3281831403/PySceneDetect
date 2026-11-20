@@ -10,6 +10,7 @@
 # included LICENSE file, or visit one of the above pages for details.
 #
 
+import csv
 import os
 import subprocess
 
@@ -560,8 +561,8 @@ def test_cli_min_scene_len_accepts_all_timecode_forms(tmp_path: Path):
         outputs.append((form, out.read_text()))
     # All forms must produce the same scene list.
     base_form, base_csv = outputs[0]
-    for form, csv in outputs[1:]:
-        assert csv == base_csv, (
+    for form, csv_text in outputs[1:]:
+        assert csv_text == base_csv, (
             f"Scene list differs between --min-scene-len {base_form!r} and {form!r}"
         )
 
@@ -1055,9 +1056,11 @@ def test_cli_legacy_v06_config_file(tmp_path: Path):
 
 def test_cli_save_qp(tmp_path: Path):
     """Test `save-qp` command with and without a custom filename format."""
+    # Frame numbers in a QP file are 0-indexed for the first frame, but all subsequent cuts use
+    # the CLI's 1-based frame numbers (the first frame of the video is frame 1).
     EXPECTED_QP_CONTENTS = """
 0 I -1
-90 I -1
+91 I -1
 """
     for filename in (None, "custom.txt"):
         filename_format = f"--filename {filename}" if filename else ""
@@ -1079,10 +1082,11 @@ def test_cli_save_qp_start_offset(tmp_path: Path):
     # with the frame numbers shifted by the start frame. Note that on the command-line, the first
     # frame is frame 1, but the first frame in a QP file is indexed by 0.
     #
-    # Since we are starting at frame 51, we must shift all cuts by 50 frames.
+    # Since we are starting at frame 51, we must shift all cuts by 50 frames. The cut at CLI
+    # frame 91 (0-based frame 90) therefore becomes frame 41.
     EXPECTED_QP_CONTENTS = """
 0 I -1
-40 I -1
+41 I -1
 """
     assert (
         invoke_scenedetect(
@@ -1098,9 +1102,11 @@ def test_cli_save_qp_start_offset(tmp_path: Path):
 
 def test_cli_save_qp_no_shift(tmp_path: Path):
     """Test `save-qp` command with start time shifting disabled."""
+    # With shifting disabled the numbers keep their absolute video position: the first row is the
+    # 0-based start frame, and cuts retain their CLI 1-based frame numbers.
     EXPECTED_QP_CONTENTS = """
 50 I -1
-90 I -1
+91 I -1
 """
     assert (
         invoke_scenedetect(
@@ -1116,10 +1122,11 @@ def test_cli_save_qp_no_shift(tmp_path: Path):
 
 def test_cli_save_keyframes(tmp_path: Path):
     """Test `save-keyframes` command."""
+    # The first entry is always frame 0; subsequent cuts use the CLI's 1-based frame numbers.
     EXPECTED_KEYFRAMES_CONTENTS = """# keyframe format v1
 fps 0
 0
-90
+91
 """
     assert (
         invoke_scenedetect(
@@ -1135,10 +1142,12 @@ fps 0
 
 def test_cli_save_keyframes_start_offset(tmp_path: Path):
     """Test `save-keyframes` command"""
+    # Keyframes are not shifted by the start time; the first entry is always frame 0 and cuts use
+    # CLI 1-based frame numbers.
     EXPECTED_KEYFRAMES_CONTENTS = """# keyframe format v1
 fps 0
 0
-90
+91
 """
     assert (
         invoke_scenedetect(
@@ -2024,3 +2033,158 @@ def test_cli_stdin_no_data(monkeypatch: pytest.MonkeyPatch):
     result = run_stdin("--stdin", "detect-content", video=None)
     assert result.returncode != 0
     assert b"Invalid value for --stdin: Failed to open input video" in result.stdout
+
+
+# -------------------------------------------------------------------
+# Post-processing (--drop-short-scenes / --merge-last-scene) outputs
+# and CLI frame numbering (#612)
+# -------------------------------------------------------------------
+
+
+def _read_csv_cut_row(csv_path: Path) -> list[str]:
+    """Return the timecodes in the first (`Timecode List:`) row of a scene list CSV."""
+    values = csv_path.read_text().splitlines()[0].split(",")
+    assert values[0] == "Timecode List:"
+    return values[1:]
+
+
+def _read_keyframe_cuts(path: Path) -> list[int]:
+    """Cut frame numbers from a keyframe format v1 file (minus the header and frame-0 sentinel)."""
+    lines = path.read_text().splitlines()
+    assert lines[:2] == ["# keyframe format v1", "fps 0"]
+    frames = [int(line) for line in lines[2:]]
+    assert frames[0] == 0
+    return frames[1:]
+
+
+def _read_qp_cuts(path: Path) -> list[int]:
+    """Cut frame numbers from a QP file (minus the first frame-0 entry)."""
+    frames = [int(line.split(" ")[0]) for line in path.read_text().splitlines()]
+    assert frames[0] == 0
+    return frames[1:]
+
+
+def test_cli_drop_short_scenes_cuts_match_scenes(tmp_path: Path):
+    """With --drop-short-scenes every cut-based output must match the final scene list's
+    internal boundaries rather than the raw detector cuts (#612)."""
+    assert (
+        invoke_scenedetect(
+            "-i {VIDEO} --min-scene-len 60 --drop-short-scenes detect-content "
+            "list-scenes save-keyframes save-qp",
+            output_dir=tmp_path,
+        )
+        == 0
+    )
+    csv_path = tmp_path / f"{DEFAULT_VIDEO_NAME}-Scenes.csv"
+    scene_rows = csv_path.read_text().splitlines()[2:]
+    num_scenes = len(scene_rows)
+    assert num_scenes > 1
+    assert len(_read_csv_cut_row(csv_path)) == num_scenes - 1
+    kf_cuts = _read_keyframe_cuts(tmp_path / f"{DEFAULT_VIDEO_NAME}-keyframes.txt")
+    qp_cuts = _read_qp_cuts(tmp_path / f"{DEFAULT_VIDEO_NAME}.qp")
+    assert len(kf_cuts) == num_scenes - 1
+    assert len(qp_cuts) == num_scenes - 1
+    # Keyframes/QP carry the same 1-based Start Frame values as the CSV scene rows.
+    start_frames = [int(row.split(",")[1]) for row in scene_rows[1:]]
+    assert kf_cuts == start_frames
+    assert qp_cuts == start_frames
+
+
+def test_cli_merge_last_scene_unit_cuts_match_scenes(test_video_file):
+    """The controller's --merge-last-scene post-processing must also update the cut list so
+    cut-based outputs only contain internal boundaries of the final scene list (#612)."""
+    from scenedetect import ContentDetector, FrameTimecode, SceneManager
+    from scenedetect._cli.context import CliContext
+    from scenedetect._cli.controller import _postprocess_scene_list
+    from scenedetect.backends import VideoStreamCv2
+    from scenedetect.scene_manager import get_cuts_from_scenes
+
+    video = VideoStreamCv2(test_video_file)
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector())
+    scene_manager.detect_scenes(video)
+    raw_scenes = scene_manager.get_scene_list(start_in_scene=True)
+    assert [start.frame_num for start, _ in raw_scenes] == [0, 30, 180, 394]
+
+    context = CliContext()
+    context.merge_last_scene = True
+    context.drop_short_scenes = False
+    # The final scene spans 326 frames; a minimum of 330 makes it eligible for merging.
+    context.min_scene_len = FrameTimecode(330, video.frame_rate)
+
+    merged = _postprocess_scene_list(context, raw_scenes)
+    assert [(start.frame_num, end.frame_num) for start, end in merged] == [
+        (0, 30),
+        (30, 180),
+        (180, 720),
+    ]
+    # The cut at frame 394 (the merged-away last scene's start) must no longer be present.
+    assert [cut.frame_num for cut in get_cuts_from_scenes(merged)] == [30, 180]
+
+
+def test_cli_drop_short_scenes_unit_cuts_match_scenes(test_video_file):
+    """`_postprocess_scene_list` in drop mode and the re-derived cuts stay in sync (#612)."""
+    from scenedetect import ContentDetector, FrameTimecode, SceneManager
+    from scenedetect._cli.context import CliContext
+    from scenedetect._cli.controller import _postprocess_scene_list
+    from scenedetect.backends import VideoStreamCv2
+    from scenedetect.scene_manager import get_cuts_from_scenes
+
+    video = VideoStreamCv2(test_video_file)
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector())
+    scene_manager.detect_scenes(video)
+    raw_scenes = scene_manager.get_scene_list(start_in_scene=True)
+
+    context = CliContext()
+    context.drop_short_scenes = True
+    context.merge_last_scene = False
+    context.min_scene_len = FrameTimecode(200, video.frame_rate)
+
+    filtered = _postprocess_scene_list(context, raw_scenes)
+    # Every surviving scene is at least 200 frames long.
+    assert all((end - start).frame_num >= 200 for start, end in filtered)
+    # The re-derived cuts are exactly the internal boundaries of the surviving scenes.
+    assert [cut.frame_num for cut in get_cuts_from_scenes(filtered)] == [
+        start.frame_num for start, _ in filtered[1:]
+    ]
+
+
+@pytest.mark.skipif(condition=not is_ffmpeg_available(), reason="ffmpeg is not available")
+def test_cli_frame_numbers_are_1based(tmp_path: Path):
+    """CLI filename templates use 1-based frame numbers consistent with the CSV Start Frame
+    column (first frame = 1). The Python API itself remains 0-based (#612)."""
+    test_video = "tests/resources/testvideo.mp4"
+    assert (
+        subprocess.call(
+            [
+                sys.executable,
+                "-m",
+                "scenedetect",
+                "-i",
+                test_video,
+                "-o",
+                str(tmp_path),
+                "time",
+                "-e",
+                "95",
+                "detect-content",
+                "save-images",
+                "-f",
+                "img-$FRAME_NUMBER",
+                "split-video",
+                "-f",
+                "clip-$START_FRAME-$END_FRAME.mp4",
+                "-a",
+                DEFAULT_FFMPEG_ARGS,
+            ]
+        )
+        == 0
+    )
+    # Detection over frames 0..94 yields scenes starting at 0-based frames 0 and 30.
+    clips = sorted(p.name for p in tmp_path.glob("clip-*.mp4"))
+    assert clips == ["clip-1-31.mp4", "clip-31-96.mp4"]
+    # The first scene's middle image is 0-based frame 15 -> 1-based 16; no 0-based names remain.
+    image_frames = sorted(int(p.stem.split("-")[1]) for p in tmp_path.glob("img-*.jpg"))
+    assert image_frames and min(image_frames) >= 1
+    assert 16 in image_frames

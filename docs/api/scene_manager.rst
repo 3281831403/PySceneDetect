@@ -27,6 +27,8 @@ Functions
 
 .. autofunction:: scenedetect.scene_manager.get_scenes_from_cuts
 
+.. autofunction:: scenedetect.scene_manager.get_cuts_from_scenes
+
 .. autofunction:: scenedetect.scene_manager.expand_scenes_to_bounds
 
 .. autofunction:: scenedetect.scene_manager.compute_downscale_factor

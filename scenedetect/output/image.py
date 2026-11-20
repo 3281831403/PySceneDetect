@@ -167,6 +167,7 @@ class _ImageExtractor:
         interval: TimecodeLike | None = None,
         min_images: int = 1,
         max_images: int | None = None,
+        one_based_frame_numbers: bool = False,
     ):
         """Multi-threaded implementation of save-images functionality. Uses background threads to
         handle image encoding and saving images to disk to improve parallelism.
@@ -217,6 +218,7 @@ class _ImageExtractor:
         self._width = width
         self._interpolation = interpolation
         self._imwrite_param: list[int] = imwrite_param if imwrite_param is not None else []
+        self._one_based_frame_numbers = one_based_frame_numbers
 
     def run(
         self,
@@ -257,12 +259,14 @@ class _ImageExtractor:
         image_num_format += str(math.floor(math.log(max_scene_images, 10)) + 2) + "d"
 
         def format_filename(scene_number: int, image_number: int, image_timecode: FrameTimecode):
+            # `$FRAME_NUMBER` is 0-based by default; the CLI opts into 1-based numbering.
             return "{}.{}".format(
                 filename_template.safe_substitute(
                     VIDEO_NAME=video.name,
                     SCENE_NUMBER=scene_num_format % (scene_number + 1),
                     IMAGE_NUMBER=image_num_format % (image_number + 1),
-                    FRAME_NUMBER=image_timecode.frame_num,
+                    FRAME_NUMBER=image_timecode.frame_num
+                    + (1 if self._one_based_frame_numbers else 0),
                     TIMESTAMP_MS=int(image_timecode.seconds * 1000),
                     TIMECODE=image_timecode.get_timecode().replace(":", ";"),
                 ),
@@ -429,6 +433,7 @@ def save_images(
     interval: TimecodeLike | None = None,
     min_images: int = 1,
     max_images: int | None = None,
+    one_based_frame_numbers: bool = False,
 ) -> dict[int, list[str]]:
     """Save a set number of images from each scene, given a list of scenes
     and the associated video/frame source.
@@ -476,6 +481,9 @@ def save_images(
             Minimum is 1. Can only be set with `interval`.
         max_images: Maximum number of images to generate for each scene with `interval`, or
             None for no limit. Can only be set with `interval`.
+        one_based_frame_numbers: If True, values substituted for the ``$FRAME_NUMBER`` template
+            variable are 1-based (the first frame is frame 1), matching the frame numbers shown
+            by the command-line interface. If False (the default), frame numbers are 0-based.
 
     Returns:
         Dictionary of the format ``{scene_num: [image_paths]}``, where ``scene_num`` is the
@@ -533,6 +541,7 @@ def save_images(
             interval,
             min_images,
             max_images,
+            one_based_frame_numbers,
         )
         return extractor.run(video, scene_list, output_dir, bool(show_progress))
 
@@ -579,7 +588,8 @@ def save_images(
                         VIDEO_NAME=video.name,
                         SCENE_NUMBER=scene_num_format % (i + 1),
                         IMAGE_NUMBER=image_num_format % (j + 1),
-                        FRAME_NUMBER=image_timecode.frame_num,
+                        FRAME_NUMBER=image_timecode.frame_num
+                        + (1 if one_based_frame_numbers else 0),
                         TIMESTAMP_MS=int(image_timecode.seconds * 1000),
                         TIMECODE=image_timecode.get_timecode().replace(":", ";"),
                     ),

@@ -124,11 +124,17 @@ class SceneMetadata:
 PathFormatter = ty.Callable[[VideoMetadata, SceneMetadata], str]
 
 
-def default_formatter(template: str) -> PathFormatter:
+def default_formatter(template: str, one_based_frame_numbers: bool = False) -> PathFormatter:
     """Formats filenames using a template string which allows the following variables:
 
     `$VIDEO_NAME`, `$SCENE_NUMBER`, `$START_TIME`, `$END_TIME`, `$START_FRAME`, `$END_FRAME`,
     `$START_PTS`, `$END_PTS` (presentation timestamp in milliseconds, accurate for VFR video)
+
+    Arguments:
+        template: Filename template with the variables above.
+        one_based_frame_numbers: If True, `$START_FRAME` and `$END_FRAME` are substituted with
+            1-based frame numbers (the first frame is frame 1), matching the frame numbers used
+            by the command-line interface. If False (the default), frame numbers are 0-based.
     """
     MIN_DIGITS = 3
 
@@ -137,13 +143,14 @@ def default_formatter(template: str) -> PathFormatter:
         return ("%0" + str(width) + "d") % (scene.index + 1)
 
     def formatter(video: VideoMetadata, scene: SceneMetadata) -> str:
+        frame_offset = 1 if one_based_frame_numbers else 0
         return Template(template).safe_substitute(
             VIDEO_NAME=video.name,
             SCENE_NUMBER=format_scene_number(video, scene),
             START_TIME=str(scene.start.get_timecode().replace(":", ";")),
             END_TIME=str(scene.end.get_timecode().replace(":", ";")),
-            START_FRAME=str(scene.start.frame_num),
-            END_FRAME=str(scene.end.frame_num),
+            START_FRAME=str(scene.start.frame_num + frame_offset),
+            END_FRAME=str(scene.end.frame_num + frame_offset),
             START_PTS=str(round(scene.start.seconds * 1000)),
             END_PTS=str(round(scene.end.seconds * 1000)),
         )
@@ -264,6 +271,7 @@ def split_video_ffmpeg(
     suppress_output=None,
     hide_progress=None,
     formatter: PathFormatter | None = None,
+    one_based_frame_numbers: bool = False,
 ) -> int:
     """Split `input_video_path` using `ffmpeg` based on the scenes in `scene_list`.
 
@@ -282,6 +290,10 @@ def split_video_ffmpeg(
         suppress_output: [DEPRECATED] DO NOT USE. For backwards compatibility only.
         hide_progress: [DEPRECATED] DO NOT USE. For backwards compatibility only.
         formatter: Custom formatter callback. Overrides `output_file_template`.
+        one_based_frame_numbers: If True, `$START_FRAME` and `$END_FRAME` in the default
+            `output_file_template` are 1-based (the first frame is frame 1), matching the
+            command-line interface. If False (the default), frame numbers are 0-based. Has no
+            effect when a custom `formatter` is provided.
 
     Returns:
         Return code of invoking ffmpeg (0 on success). If scene_list is empty, will
@@ -318,7 +330,9 @@ def split_video_ffmpeg(
     scene_num_format += str(max(3, math.floor(math.log(len(scene_list), 10)) + 1)) + "d"
 
     if formatter is None:
-        formatter = default_formatter(output_file_template)
+        formatter = default_formatter(
+            output_file_template, one_based_frame_numbers=one_based_frame_numbers
+        )
     video_metadata = VideoMetadata(
         name=video_name, path=Path(input_video_path), total_scenes=len(scene_list)
     )

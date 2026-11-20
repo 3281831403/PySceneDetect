@@ -322,7 +322,8 @@ class TimecodeFormat(Enum):
     """Format to display timecodes."""
 
     FRAMES = 0
-    """Print timecodes as exact frame number."""
+    """Print timecodes as exact frame number. Frame numbers are 1-based on the CLI (the first
+    frame is frame 1), matching the scene list output."""
     TIMECODE = 1
     """Print timecodes in format HH:MM:SS.nnn."""
     SECONDS = 2
@@ -330,7 +331,9 @@ class TimecodeFormat(Enum):
 
     def format(self, timecode: FrameTimecode) -> str:
         if self == TimecodeFormat.FRAMES:
-            return str(timecode.frame_num)
+            # The underlying FrameTimecode stores 0-based frame numbers, but the CLI displays
+            # frame numbers as 1-based (the first frame of the video is frame 1).
+            return str(timecode.frame_num + 1)
         if self == TimecodeFormat.TIMECODE:
             return timecode.get_timecode()
         if self == TimecodeFormat.SECONDS:

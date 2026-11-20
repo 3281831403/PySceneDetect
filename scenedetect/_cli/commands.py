@@ -97,9 +97,12 @@ def save_qp(
     shift_start = not disable_shift
     offset = start_frame if shift_start else 0
     with open(qp_path, "w") as qp_file:
+        # The first row is always frame 0 (or the unshifted start frame with --disable-shift)
+        # since QP files are indexed from 0. All other entries are the CLI's 1-based cut frame
+        # numbers (the first frame of the video is frame 1), converted to QP indexing here.
         qp_file.write(f"{0 if shift_start else start_frame} I -1\n")
         # Place another I frame at each detected cut.
-        qp_file.writelines(f"{cut.frame_num - offset} I -1\n" for cut in cuts)
+        qp_file.writelines(f"{cut.frame_num + 1 - offset} I -1\n" for cut in cuts)
     logger.info(f"QP file written to: {qp_path}")
 
 
@@ -118,11 +121,13 @@ def save_keyframes(
         # The keyframe format v1 specification includes an FPS field, but Aegisub does not
         # use it and documents `0` as the conventional value:
         # https://aegisub.org/docs/latest/video/#keyframe-file-specification
+        # The first entry is always the frame-0 sentinel; subsequent entries use the CLI's
+        # 1-based frame numbers (the first frame of the video is frame 1).
         keyframes_file.write("fps 0\n")
         keyframes_file.write("0\n")
         # TODO(https://scenedetect.com/issues/569): Frame numbers are approximate for VFR
         # input until exact presentation-frame ordinals are tracked.
-        keyframes_file.writelines(f"{cut.frame_num}\n" for cut in cuts)
+        keyframes_file.writelines(f"{cut.frame_num + 1}\n" for cut in cuts)
     logger.info(f"Keyframes written to: {keyframes_path}")
 
 
@@ -233,6 +238,8 @@ def save_images(
         width=width,
         interpolation=interpolation,
         threading=threading,
+        # Frame numbers shown by the CLI are 1-based (the first frame is frame 1).
+        one_based_frame_numbers=True,
     )
     # Save the result for use by `save-html` if required.
     context.save_images_result = (images, output)
@@ -293,6 +300,9 @@ def split_video(
             arg_override=ffmpeg_args,
             show_progress=not context.quiet_mode,
             show_output=show_output,
+            # Frame numbers in filename template variables are 1-based on the CLI (the first
+            # frame is frame 1).
+            one_based_frame_numbers=True,
         )
     if scenes:
         logger.info("Video splitting completed, scenes written to disk.")

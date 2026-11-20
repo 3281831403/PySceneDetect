@@ -3,6 +3,18 @@
 
 ## PySceneDetect 0.7
 
+### PySceneDetect 0.7.4 (unreleased)
+
+#### CLI Changes
+
+ - [bugfix] Cut-based outputs (`list-scenes` CSV cut row and terminal output, `save-html`, `save-keyframes`, `save-qp`) now contain exactly the internal boundaries of the final scene list after `--drop-short-scenes` or `--merge-last-scene`, instead of the raw detector cuts. Previously the cut list could reference scenes that were dropped or merged away [#612](https://github.com/Breakthrough/PySceneDetect/issues/612)
+ - [bugfix] Frame numbers shown by the CLI are now consistently 1-based (the first frame of the video is frame 1), matching the Start Frame column of the scene list CSV: `save-keyframes` and `save-qp` keep their frame-0 first row but write all cut entries as 1-based, `save-images` `$FRAME_NUMBER` and `split-video` `$START_FRAME`/`$END_FRAME` are 1-based, and `list-scenes --cut-format frames` prints 1-based frame numbers. The Python API keeps its 0-based defaults; `save_images()` and `default_formatter()` accept a new `one_based_frame_numbers` argument [#612](https://github.com/Breakthrough/PySceneDetect/issues/612)
+
+#### API Changes
+
+ - [feature] Add `get_cuts_from_scenes()` to derive a cut list (the start time of every scene but the first) from a scene list, the inverse of `get_scenes_from_cuts()` for contiguous scene lists
+ - [feature] `save_images()` and `default_formatter()`/`split_video_ffmpeg()` accept a new `one_based_frame_numbers` argument; when False (the default) frame numbers stay 0-based as before
+
 ### PySceneDetect 0.7.3 (November 8, 2026)
 
 PySceneDetect 0.7.3 adds scene-length based image export to `save-images`, a `close()` method and context manager support for `VideoStream`, and fixes several timing bugs: PyAV frame timing for videos without presentation timestamps, `save-edl` timecode drift at NTSC frame rates, OTIO source durations, and the last scene of variable framerate videos. Windows distributions ship updated dependencies.

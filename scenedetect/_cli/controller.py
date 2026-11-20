@@ -21,7 +21,12 @@ from scenedetect._cli.context import CliContext
 from scenedetect.backends import VideoStreamCv2, VideoStreamMoviePy
 from scenedetect.common import FrameTimecode
 from scenedetect.platform import get_and_create_path
-from scenedetect.scene_manager import CutList, SceneList, get_scenes_from_cuts
+from scenedetect.scene_manager import (
+    CutList,
+    SceneList,
+    get_cuts_from_scenes,
+    get_scenes_from_cuts,
+)
 from scenedetect.video_stream import SeekError
 
 logger = logging.getLogger("pyscenedetect")
@@ -56,6 +61,9 @@ def run_scenedetect(context: CliContext) -> bool:
             logger.warning("WARNING: -s/--stats will be ignored due to load-scenes.")
         scenes, cuts = _load_scenes(context)
         scenes = _postprocess_scene_list(context, scenes)
+        # Cut outputs must reflect the final scene list (e.g. after --drop-short-scenes or
+        # --merge-last-scene), not the raw cuts parsed from the input file.
+        cuts = get_cuts_from_scenes(scenes)
         logger.info("Loaded %d scenes.", len(scenes))
     else:
         # Perform scene detection on input.
@@ -64,6 +72,9 @@ def run_scenedetect(context: CliContext) -> bool:
             return False
         scenes, cuts = result
         scenes = _postprocess_scene_list(context, scenes)
+        # Re-derive the cut list from the (possibly post-processed) scene list so all cut-based
+        # outputs match the internal boundaries of the scenes that were actually kept/merged.
+        cuts = get_cuts_from_scenes(scenes)
         # Handle -s/--stats option.
         _save_stats(context)
         if scenes:

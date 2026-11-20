@@ -258,6 +258,62 @@ def test_save_images_sub_frame_scene_stays_in_scene(test_video_file, tmp_path: P
     assert image_filenames == {0: [f"001.{start.frame_num}.jpg"]}
 
 
+@pytest.mark.parametrize("threading", [True, False])
+def test_save_images_frame_number_basis(test_video_file, tmp_path: Path, threading: bool):
+    """`$FRAME_NUMBER` is 0-based by default (API) and 1-based only with the explicit opt-in."""
+    fps = VideoStreamCv2(test_video_file).frame_rate
+    scene_list = [(FrameTimecode(11, fps), FrameTimecode(12, fps))]
+    default_names = save_images(
+        scene_list=scene_list,
+        output_dir=tmp_path / "default",
+        video=VideoStreamCv2(test_video_file),
+        num_images=1,
+        image_name_template="$SCENE_NUMBER.$FRAME_NUMBER",
+        threading=threading,
+    )
+    assert default_names == {0: ["001.11.jpg"]}
+    one_based_names = save_images(
+        scene_list=scene_list,
+        output_dir=tmp_path / "one_based",
+        video=VideoStreamCv2(test_video_file),
+        num_images=1,
+        image_name_template="$SCENE_NUMBER.$FRAME_NUMBER",
+        threading=threading,
+        one_based_frame_numbers=True,
+    )
+    assert one_based_names == {0: ["001.12.jpg"]}
+
+
+def test_default_formatter_frame_number_basis():
+    """`$START_FRAME`/`$END_FRAME` are 0-based by default and 1-based on opt-in."""
+    from scenedetect.output import default_formatter
+
+    fps = Fraction(30, 1)
+    video = VideoMetadata(name="video", path=Path("video.mp4"), total_scenes=1)
+    scene = SceneMetadata(index=0, start=FrameTimecode(0, fps), end=FrameTimecode(30, fps))
+    template = "$VIDEO_NAME-$START_FRAME-$END_FRAME"
+    assert default_formatter(template)(video, scene) == "video-0-30"
+    assert default_formatter(template, one_based_frame_numbers=True)(video, scene) == "video-1-31"
+
+
+def test_get_cuts_from_scenes():
+    """`get_cuts_from_scenes` returns the internal boundaries (all scene starts but the first),
+    and is the inverse of `get_scenes_from_cuts` for contiguous scene lists."""
+    from scenedetect.scene_manager import get_cuts_from_scenes, get_scenes_from_cuts
+
+    fps = Fraction(30, 1)
+    raw_cuts = [FrameTimecode(frame, fps) for frame in (30, 90, 150)]
+    scenes = get_scenes_from_cuts(
+        cut_list=raw_cuts, start_pos=FrameTimecode(0, fps), end_pos=FrameTimecode(200, fps)
+    )
+    assert get_cuts_from_scenes(scenes) == raw_cuts
+    assert get_cuts_from_scenes([]) == []
+    assert get_cuts_from_scenes(scenes[:1]) == []
+    # Simulate --drop-short-scenes: the derived cuts must follow the surviving scenes.
+    surviving = [scenes[0], scenes[2]]
+    assert [cut.frame_num for cut in get_cuts_from_scenes(surviving)] == [90]
+
+
 def test_save_images_rejects_negative_margin(test_video_file, tmp_path: Path):
     video = VideoStreamCv2(test_video_file)
     scene_list = [(FrameTimecode(0, video.frame_rate), FrameTimecode(10, video.frame_rate))]

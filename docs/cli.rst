@@ -792,7 +792,7 @@ Options
 
 .. option:: -f NAME, --filename NAME
 
-  Filename format *without* extension to use when saving images. You can use the $VIDEO_NAME, $SCENE_NUMBER, $IMAGE_NUMBER, and $FRAME_NUMBER macros in the file name. You may have to use escape characters (e.g. -f \$SCENE_NUMBER-Image-\$IMAGE_NUMBER) or single quotes.
+  Filename format *without* extension to use when saving images. You can use the $VIDEO_NAME, $SCENE_NUMBER, $IMAGE_NUMBER, and $FRAME_NUMBER macros in the file name. You may have to use escape characters (e.g. -f \$SCENE_NUMBER-Image-\$IMAGE_NUMBER) or single quotes. The $FRAME_NUMBER macro uses 1-based frame numbers (the first frame of the video is frame 1), matching the Start Frame column of the scene list CSV.
 
   Default: ``$VIDEO_NAME-Scene-$SCENE_NUMBER-$IMAGE_NUMBER``
 
@@ -874,7 +874,9 @@ Options
 
 Save detected cuts using keyframe format v1.
 
-Frame numbers are currently approximate for variable framerate (VFR) video.
+The first entry is always frame 0; all subsequent frame numbers are 1-based (the first frame
+of the video is frame 1), matching the Start Frame column of the scene list CSV. Frame numbers
+are currently approximate for variable framerate (VFR) video.
 
 
 Options
@@ -950,7 +952,11 @@ Options
 
 Save cuts as keyframes (I-frames) for video encoding.
 
-The resulting QP file can be used with the ``--qpfile`` argument in x264/x265.
+The resulting QP file can be used with the ``--qpfile`` argument in x264/x265. The first row
+is always frame 0 (QP files are indexed from zero); all subsequent cut frame numbers are
+1-based (the first frame of the video is frame 1), matching the Start Frame column of the
+scene list CSV. When a start time is set, cut frame numbers are shifted relative to it unless
+:option:`--disable-shift <scenedetect save-qp -d>` is used.
 
 
 Options
@@ -1013,7 +1019,7 @@ Options
 
 .. option:: -f NAME, --filename NAME
 
-  File name format to use when saving videos, with or without extension. You can use $VIDEO_NAME and $SCENE_NUMBER macros in the filename. You may have to wrap the format in single quotes or use escape characters to avoid variable expansion (e.g. -f \$VIDEO_NAME-Scene-\$SCENE_NUMBER).
+  File name format to use when saving videos, with or without extension. You can use $VIDEO_NAME and $SCENE_NUMBER macros in the filename. You may have to wrap the format in single quotes or use escape characters to avoid variable expansion (e.g. -f \$VIDEO_NAME-Scene-\$SCENE_NUMBER). The $START_FRAME, $END_FRAME, $START_TIME, $END_TIME, $START_PTS and $END_PTS macros are also available; $START_FRAME and $END_FRAME use 1-based frame numbers (the first frame of the video is frame 1).
 
   Default: ``$VIDEO_NAME-Scene-$SCENE_NUMBER``
 
