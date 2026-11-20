@@ -658,23 +658,22 @@ def test_seek_reads_from_start_if_probe_finds_no_timestamp(test_video_file: str,
 def test_missing_pts_ts_seek_matches_sequential(test_missing_pts_ts: str, caplog, auto_close):
     """Seeking must land where a sequential read would. The first keyframe of this file has no
     timestamps, so the demuxer lands on the next one (frame 61) for any target before it, which
-    used to leave the stream there. The file is VFR, so the expected frame is found by time:
-    `seek(t)` followed by `read()` must return the frame after the first one at or after `(t - 1)`
-    nominal frame periods. `seek(1)` is included since it re-opens the stream and must then read
-    the first frame before the walk forward can compare positions (raised in PR #592)."""
+    used to leave the stream there. Frame-number seeks now target an exact presentation ordinal:
+    `seek(t)` followed by `read()` must return the frame at 0-based ordinal `t`, identical to the
+    frame a sequential pass produces there, and `frame_number` must report `t + 1`. `seek(1)` is
+    included since it re-opens the stream (raised in PR #592)."""
     stream = auto_close(VideoStreamAv(test_missing_pts_ts))
     sequential = []
     while stream.read(decode=False) is not False:
-        sequential.append(stream.position.seconds)
-    frame_period = 1.0 / float(stream.frame_rate)
-    # Positions are in 90 kHz ticks, so allow one tick when comparing against frame boundaries.
-    tick = 1.0 / 90000
+        sequential.append(stream.position)
     for target in (1, 2, 10, 50, 100, 150):
         stream.seek(target)
+        # Before the read the stream holds the frame before the target.
+        assert stream.frame_number == target
         assert stream.read(decode=False) is not False
-        target_seconds = (target - 1) * frame_period
-        landed = next(i for i, seconds in enumerate(sequential) if seconds >= target_seconds - tick)
-        assert stream.position.seconds == sequential[landed + 1], target
+        # The read returns the exact target ordinal, matching a sequential read.
+        assert stream.frame_number == target + 1
+        assert stream.position == sequential[target]
     assert not [record for record in caplog.records if "backwards" in record.message]
 
 

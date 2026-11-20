@@ -50,6 +50,13 @@ from scenedetect.platform import (
 
 logger = logging.getLogger("pyscenedetect")
 
+
+def _ordinal(timecode: FrameTimecode) -> int:
+    """Exact 0-based presentation ordinal of `timecode`, falling back to its PTS-derived
+    `frame_num` when the timecode carries no ordinal (identical for CFR video)."""
+    return timecode.frame_index if timecode.frame_index is not None else timecode.frame_num
+
+
 _COMMAND_TOO_LONG_STRING = """
 Cannot split video due to too many scenes (resulting command
 is too large to process). To work around this issue, you can
@@ -137,13 +144,23 @@ def default_formatter(template: str) -> PathFormatter:
         return ("%0" + str(width) + "d") % (scene.index + 1)
 
     def formatter(video: VideoMetadata, scene: SceneMetadata) -> str:
+        # Prefer the exact presentation ordinal; falls back to the PTS-derived frame number when
+        # the timecode carries no ordinal (the two are identical for CFR video).
+        start_frame = (
+            scene.start.frame_index
+            if scene.start.frame_index is not None
+            else scene.start.frame_num
+        )
+        end_frame = (
+            scene.end.frame_index if scene.end.frame_index is not None else scene.end.frame_num
+        )
         return Template(template).safe_substitute(
             VIDEO_NAME=video.name,
             SCENE_NUMBER=format_scene_number(video, scene),
             START_TIME=str(scene.start.get_timecode().replace(":", ";")),
             END_TIME=str(scene.end.get_timecode().replace(":", ";")),
-            START_FRAME=str(scene.start.frame_num),
-            END_FRAME=str(scene.end.frame_num),
+            START_FRAME=str(start_frame),
+            END_FRAME=str(end_frame),
             START_PTS=str(round(scene.start.seconds * 1000)),
             END_PTS=str(round(scene.end.seconds * 1000)),
         )

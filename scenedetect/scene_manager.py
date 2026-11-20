@@ -243,6 +243,9 @@ class SceneManager:
         self._start_pos: FrameTimecode | None = None
         # Position of video on the last frame processed by detect_scenes.
         self._last_pos: FrameTimecode | None = None
+        # Duration of the video passed to detect_scenes, recorded when processing ends. Used to
+        # keep the final scene's end from overshooting the end of the video (see get_scene_list).
+        self._video_duration: FrameTimecode | None = None
         # Size of the decoded frames.
         self._frame_size: tuple[int, int] | None = None
         self._frame_size_errors: int = 0
@@ -364,6 +367,7 @@ class SceneManager:
         self._cutting_list.clear()
         self._last_pos = None
         self._start_pos = None
+        self._video_duration = None
         self._frame_size = None
         self.clear_detectors()
 
@@ -389,8 +393,21 @@ class SceneManager:
         if self._base_timecode is None or self._start_pos is None or self._last_pos is None:
             return []
         cut_list = self._get_cutting_list()
+        end_pos = self._last_pos + 1
+        # One nominal frame period past the last frame can overshoot the end of the video on VFR
+        # sources (e.g. when the backend's nominal rate is the average frame rate but the last
+        # frame is shorter). Clamp the final scene's end to the reported duration so it never
+        # ends past the end of the video. The displayed timecode must differ, otherwise inputs
+        # whose reported duration is a hair short of the frame boundary (e.g. some CFR streams)
+        # would have their sub-millisecond rounding changed.
+        if (
+            self._video_duration is not None
+            and end_pos.seconds > self._video_duration.seconds
+            and end_pos.get_timecode() != self._video_duration.get_timecode()
+        ):
+            end_pos = self._video_duration
         scene_list = get_scenes_from_cuts(
-            cut_list=cut_list, start_pos=self._start_pos, end_pos=self._last_pos + 1
+            cut_list=cut_list, start_pos=self._start_pos, end_pos=end_pos
         )
         # If we didn't actually detect any cuts, make sure the resulting scene_list is empty
         # unless start_in_scene is True.
@@ -616,6 +633,9 @@ class SceneManager:
             raise exc.with_traceback(self._exception_info[2])
 
         self._last_pos = video.position
+        # Record the duration once processing ends: backends which learn the exact frame count
+        # from a complete decode pass (e.g. PyAV on VFR video) only attach it after EOF.
+        self._video_duration = video.duration
         self._post_process(video.position)
 
         return video.frame_number - start_frame_num

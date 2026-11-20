@@ -33,6 +33,7 @@ from scenedetect.common import (
     FrameTimecode,
     Timecode,
     TimecodeLike,
+    _FrameNumber,
     framerate_to_fraction,
 )
 from scenedetect.platform import StrPath, get_file_name
@@ -154,9 +155,21 @@ class VideoStreamCv2(VideoStream):
 
         # VideoCapture state
         self._has_grabbed = False
+        # Exact 1-based count of frames grabbed since the start of the current pass, or None when
+        # it cannot be derived from the capture's position (e.g. after a seek outside the PTS
+        # index). `CAP_PROP_POS_FRAMES` is the nominal frame index, which differs from the decoded
+        # frame count on VFR video, so it can only be trusted to establish this value.
+        self._frames_decoded: int | None = None
         self._max_decode_attempts = max_decode_attempts
         self._decode_failures = 0
         self._warning_displayed = False
+        # Presentation timestamp (in milliseconds) of every grabbed frame, indexed by 0-based
+        # frame ordinal. Built lazily by sequential reads so frame-ordinal seeks land on exactly
+        # the requested frame on VFR video, where `msec * avg_fps` is not a frame count.
+        self._frame_pts_ms: list[float] = []
+        # True while reading sequentially from the start; cleared by any non-zero seek so the PTS
+        # index can only be extended by in-order frames. `reset()`/seek(0) restore it.
+        self._pass_from_start = True
 
         # `_open_capture` populates `_cap` and `_frame_rate`.
         self._open_capture(frame_rate)
@@ -228,9 +241,15 @@ class VideoStreamCv2(VideoStream):
         """Duration of the stream as a FrameTimecode, or None if non terminating."""
         if self._is_device:
             return None
-        if self._closed:
-            return self.base_timecode + math.trunc(self._closed_frame_count)
-        return self.base_timecode + math.trunc(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_count = math.trunc(
+            self._closed_frame_count if self._closed else self._cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        )
+        duration = self.base_timecode + frame_count
+        # OpenCV's frame count is the actual number of frames, so the frame after the last
+        # decoded frame marks the end of the video: carry it as the exact presentation ordinal.
+        if frame_count > 0:
+            duration = duration.with_frame_index(frame_count)
+        return duration
 
     @property
     def aspect_ratio(self) -> float:
@@ -262,7 +281,12 @@ class VideoStreamCv2(VideoStream):
             time_base = Fraction(1, fps.numerator)
             pts = (self.frame_number - 1) * fps.denominator
             timecode = Timecode(pts=pts, time_base=time_base)
-        return FrameTimecode(timecode=timecode, fps=self.frame_rate)
+        position = FrameTimecode(timecode=timecode, fps=self.frame_rate)
+        # Exact presentation ordinal: the number of grabs in this pass counts decoded frames, so
+        # the frame currently held is at 0-based ordinal `frames_decoded - 1`.
+        if self._frames_decoded is not None and self._frames_decoded > 0:
+            position = position.with_frame_index(self._frames_decoded - 1)
+        return position
 
     @property
     def position_ms(self) -> float:
@@ -270,6 +294,11 @@ class VideoStreamCv2(VideoStream):
 
     @property
     def frame_number(self) -> int:
+        """1-based count of frames grabbed in the current pass, or the capture's nominal frame
+        index when the exact count cannot be established (e.g. after seeking outside the frame
+        index on VFR video)."""
+        if self._frames_decoded is not None:
+            return self._frames_decoded
         return math.trunc(self._cap.get(cv2.CAP_PROP_POS_FRAMES))
 
     def seek(self, target: TimecodeLike):
@@ -280,9 +309,45 @@ class VideoStreamCv2(VideoStream):
             target = FrameTimecode(target, self.frame_rate)
         if target < 0:
             raise ValueError("Target seek position cannot be negative!")
-        target_secs = (self.base_timecode + target).seconds
         self._has_grabbed = False
         self._eof_timecode = None
+
+        # Resolve a frame-ordinal target (an integer frame number or a timecode carrying an exact
+        # presentation index) to its recorded presentation timestamp. On VFR video this is the only
+        # way to land on the exact Nth frame, since `msec * avg_fps` is not a frame count there;
+        # it also keeps this backend's frame-number seeks identical to the PyAV backend's.
+        ordinal_target: int | None = None
+        if target.frame_index is not None:
+            ordinal_target = target.frame_index
+        elif isinstance(target._time, _FrameNumber):
+            ordinal_target = target._time.value
+
+        if ordinal_target is not None and ordinal_target <= 0:
+            # Seeking to the start: rewind by frame index, which OpenCV handles exactly.
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self._pass_from_start = True
+            self._frames_decoded = 0
+            return
+
+        if ordinal_target is not None and ordinal_target < len(self._frame_pts_ms):
+            # Seek to the recorded PTS of the frame *before* the target (ordinal N-1), then grab
+            # forward until the capture holds it. The next `read()` yields the target frame at
+            # ordinal N, matching the PyAV backend's seek(N)/read() convention.
+            self._seek_ordinal_via_index(ordinal_target - 1)
+            return
+
+        if ordinal_target is not None:
+            # The PTS index does not cover the target yet (no prior sequential pass). The only
+            # exact way to reach an ordinal on VFR video is to decode forward from the start,
+            # building the index as we go. Read `ordinal_target` frames so the capture holds
+            # ordinal N-1 (frame_number == N) and the next `read()` returns ordinal N, matching
+            # the PyAV backend's seek(N)/read() convention.
+            self._seek_ordinal_by_decoding(ordinal_target)
+            return
+
+        target_secs = (self.base_timecode + target).seconds
+        self._pass_from_start = False
+        self._frames_decoded = None
         if target_secs > 0:
             # Seek one frame before target so the next read() returns the frame at target.
             one_frame_ms = 1000.0 / float(self._frame_rate)
@@ -312,12 +377,83 @@ class VideoStreamCv2(VideoStream):
                 self._has_grabbed = self._cap.grab()
         else:
             self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self._pass_from_start = True
+
+    def _ordinal_for_ms(self, msec: float) -> int | None:
+        """0-based ordinal of the frame whose recorded presentation time is `msec`, or None if the
+        capture is not on a frame recorded in the index (e.g. the seek landed before the index
+        starts or the reported time does not match any entry)."""
+        # `_frame_pts_ms` is sorted by presentation time, so a binary search is exact.
+        lo, hi = 0, len(self._frame_pts_ms)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if abs(self._frame_pts_ms[mid] - msec) <= 1e-3:
+                return mid
+            if self._frame_pts_ms[mid] < msec:
+                lo = mid + 1
+            else:
+                hi = mid
+        return None
+
+    def _seek_ordinal_via_index(self, ordinal: int) -> None:
+        """Position the capture so it holds the frame at 0-based `ordinal`, using the recorded PTS
+        index. Only valid when `ordinal < len(self._frame_pts_ms)`.
+
+        Seeks to a recorded presentation time and then grabs forward one frame at a time, counting
+        against the index instead of OpenCV's nominal frame index (which is not a decoded-frame
+        count on VFR video). OpenCV can round a time seek to a frame past the requested entry, so
+        an overshoot retries from an earlier entry with a growing margin. Exactness is what
+        matters here; the walk is at most a few frames for typical VFR content.
+        """
+        assert 0 <= ordinal < len(self._frame_pts_ms)
+        delta = 1
+        while True:
+            start = max(ordinal - delta, 0)
+            self._cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, self._frame_pts_ms[start]))
+            self._pass_from_start = False
+            self._has_grabbed = self._cap.grab()
+            if not self._has_grabbed:
+                # The requested time was past the last decodable frame; walk from the start.
+                self._seek_ordinal_by_decoding(ordinal + 1)
+                return
+            held = self._ordinal_for_ms(float(self._cap.get(cv2.CAP_PROP_POS_MSEC)))
+            while held is not None and held <= ordinal:
+                if held == ordinal:
+                    # The capture holds the frame at `ordinal`; it is the `ordinal + 1`-th grab.
+                    self._frames_decoded = ordinal + 1
+                    return
+                if not self._cap.grab():
+                    break
+                held = self._ordinal_for_ms(float(self._cap.get(cv2.CAP_PROP_POS_MSEC)))
+            # Landed past the target (or could not be resolved): retry from further back.
+            if start == 0:
+                self._seek_ordinal_by_decoding(ordinal + 1)
+                return
+            delta *= 2
+
+    def _seek_ordinal_by_decoding(self, frame_number: int) -> None:
+        """Position the capture so the next `read()` yields the frame at 0-based ordinal
+        `frame_number - 1`, by decoding forward from the start. Exact on every input; also
+        rebuilds the PTS index. `frame_number` uses the 1-based seek pointer convention (seek(N)
+        followed by read() returns ordinal N, with `frame_number == N` before the read)."""
+        self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self._has_grabbed = False
+        self._eof_timecode = None
+        self._pass_from_start = True
+        self._frames_decoded = 0
+        for _ in range(frame_number):
+            if not self.read(decode=False):
+                break
+        self._pass_from_start = False
 
     def reset(self):
         """Close and re-open the VideoStream (should be equivalent to calling `seek(0)`)."""
         self._check_open()
         self._cap.release()
         self._open_capture(float(self._frame_rate))
+        self._frame_pts_ms.clear()
+        self._pass_from_start = True
+        self._frames_decoded = 0
 
     def close(self) -> None:
         """Close the video, releasing the underlying `cv2.VideoCapture`. Has no effect if the
@@ -360,6 +496,15 @@ class VideoStreamCv2(VideoStream):
             return False
         self._has_grabbed = True
         self._eof_timecode = None
+        # Each successful grab advances the exact decoded-frame count by one.
+        if self._frames_decoded is not None:
+            self._frames_decoded += 1
+        # Record the grabbed frame's PTS (milliseconds) against its 0-based ordinal while reading
+        # sequentially, enabling exact frame-ordinal seeks on VFR video later.
+        if self._pass_from_start and self._frames_decoded is not None:
+            ordinal = self._frames_decoded - 1
+            if ordinal == len(self._frame_pts_ms):
+                self._frame_pts_ms.append(float(self._cap.get(cv2.CAP_PROP_POS_MSEC)))
         # Need to make sure we actually grabbed a frame before calling retrieve.
         if decode and self._has_grabbed:
             _, frame = self._cap.retrieve()
@@ -423,6 +568,7 @@ class VideoStreamCv2(VideoStream):
         self._frame_rate: Fraction = framerate_to_fraction(frame_rate)
         self._has_grabbed = False
         self._eof_timecode: Timecode | None = None
+        self._frames_decoded = 0
         cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1.0)  # https://github.com/opencv/opencv/issues/26795
 
 

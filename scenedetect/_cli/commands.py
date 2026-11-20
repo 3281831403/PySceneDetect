@@ -44,6 +44,12 @@ from scenedetect.scene_manager import (
 logger = logging.getLogger("pyscenedetect")
 
 
+def _ordinal(timecode) -> int:
+    """Exact 0-based presentation ordinal of `timecode`, falling back to its PTS-derived
+    `frame_num` when the timecode carries no ordinal (identical for CFR video)."""
+    return timecode.frame_index if timecode.frame_index is not None else timecode.frame_num
+
+
 def save_html(
     context: CliContext,
     scenes: SceneList,
@@ -93,13 +99,13 @@ def save_qp(
         Template(filename).safe_substitute(VIDEO_NAME=context.video_stream.name),
         output,
     )
-    start_frame = context.start_time.frame_num if context.start_time else 0
+    start_frame = _ordinal(context.start_time) if context.start_time else 0
     shift_start = not disable_shift
     offset = start_frame if shift_start else 0
     with open(qp_path, "w") as qp_file:
         qp_file.write(f"{0 if shift_start else start_frame} I -1\n")
         # Place another I frame at each detected cut.
-        qp_file.writelines(f"{cut.frame_num - offset} I -1\n" for cut in cuts)
+        qp_file.writelines(f"{_ordinal(cut) - offset} I -1\n" for cut in cuts)
     logger.info(f"QP file written to: {qp_path}")
 
 
@@ -120,9 +126,9 @@ def save_keyframes(
         # https://aegisub.org/docs/latest/video/#keyframe-file-specification
         keyframes_file.write("fps 0\n")
         keyframes_file.write("0\n")
-        # TODO(https://scenedetect.com/issues/569): Frame numbers are approximate for VFR
-        # input until exact presentation-frame ordinals are tracked.
-        keyframes_file.writelines(f"{cut.frame_num}\n" for cut in cuts)
+        # Cuts carry exact presentation-frame ordinals from the backend, which for CFR video
+        # equal the PTS-derived frame numbers.
+        keyframes_file.writelines(f"{_ordinal(cut)}\n" for cut in cuts)
     logger.info(f"Keyframes written to: {keyframes_path}")
 
 
@@ -178,7 +184,7 @@ def list_scenes(
 -----------------------------------------------------------------------""",
             "\n".join(
                 [
-                    f" |  {i + 1:5d}  | {start_time.frame_num + 1:11d} | {start_time.get_timecode()} | {end_time.frame_num:11d} | {end_time.get_timecode()} |"
+                    f" |  {i + 1:5d}  | {_ordinal(start_time) + 1:11d} | {start_time.get_timecode()} | {_ordinal(end_time):11d} | {end_time.get_timecode()} |"
                     for i, (start_time, end_time) in enumerate(scenes)
                 ]
             ),

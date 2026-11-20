@@ -198,7 +198,12 @@ class StatsManager:
             if not isinstance(frame_key, FrameTimecode):
                 continue
             csv_writer.writerow(
-                [frame_key.frame_num + 1, frame_key.get_timecode()]
+                [
+                    (frame_key.frame_index + 1)
+                    if frame_key.frame_index is not None
+                    else (frame_key.frame_num + 1),
+                    frame_key.get_timecode(),
+                ]
                 + [str(metric) for metric in self.get_metrics(frame_key, metric_keys)]
             )
 

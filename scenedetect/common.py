@@ -228,6 +228,7 @@ class FrameTimecode:
         self,
         timecode: "TimecodeLike",
         fps: "float | FrameTimecode | Fraction | None" = None,
+        frame_index: int | None = None,
     ):
         """
         Arguments:
@@ -235,6 +236,11 @@ class FrameTimecode:
                 the form `'HH:MM:SS'` or `'HH:MM:SS.nnn'`, or a `Timecode`.
             fps: The framerate to use for distance between frames and to calculate frame numbers.
                 For a VFR video, this may just be the average framerate.
+            frame_index: Optional 0-based ordinal of the frame in presentation order. Video
+                backends set this on timecodes produced by `read()` (and on values derived from
+                them, such as detected cuts) so :attr:`frame_index` reports an exact decoded-frame
+                count on variable frame rate (VFR) video, where :attr:`frame_num` is only a
+                PTS-derived approximation. Must be non-negative.
         Raises:
             TypeError: Thrown if either `timecode` or `fps` are unsupported types.
             ValueError: Thrown when specifying a negative timecode or framerate.
@@ -243,11 +249,21 @@ class FrameTimecode:
         """Internal time representation."""
         self._rate: Fraction | None = None
         """Rate at which time passes between frames, measured in frames/sec."""
+        # Exact 0-based presentation ordinal of this frame, or None if this timecode was not
+        # produced by reading an actual frame from a video (e.g. a user-supplied seek target).
+        self._frame_index: int | None = None
+        if frame_index is not None:
+            if frame_index < 0:
+                raise ValueError("frame_index must be non-negative.")
+            self._frame_index = int(frame_index)
 
         # Copy constructor.
         if isinstance(timecode, FrameTimecode):
             self._time = timecode._time
             self._rate = timecode._rate if fps is None else self._ensure_fractional(fps)
+            # Preserve the source ordinal unless the caller explicitly overrode it.
+            if frame_index is None:
+                self._frame_index = timecode._frame_index
             return
 
         # Ensure args are consistent with API.
@@ -290,6 +306,30 @@ class FrameTimecode:
         if isinstance(self._time, _Seconds):
             return self._seconds_to_frames(self._time.value)
         return self._time.value
+
+    @property
+    def frame_index(self) -> int | None:
+        """Exact 0-based ordinal of this frame in presentation order, if known.
+
+        Video backends set this on every timecode returned from `read()` (and on the timecodes
+        derived from them, such as detected cuts), so it counts actual decoded frames rather than
+        PTS-derived nominal frame numbers. For CFR video this always equals :attr:`frame_num`;
+        for VFR video the two can differ. Returns ``None`` for timecodes not tied to a decoded
+        frame (e.g. values parsed from user input or computed purely from seconds).
+        """
+        return self._frame_index
+
+    def with_frame_index(self, frame_index: int | None) -> "FrameTimecode":
+        """Return a copy of this timecode carrying the given presentation ordinal.
+
+        Arguments:
+            frame_index: 0-based frame ordinal, or ``None`` to clear an existing one.
+        """
+        copy = FrameTimecode(timecode=self)
+        if frame_index is not None and frame_index < 0:
+            raise ValueError("frame_index must be non-negative.")
+        copy._frame_index = None if frame_index is None else int(frame_index)
+        return copy
 
     @property
     def frame_rate(self) -> Fraction | None:
@@ -664,6 +704,20 @@ class FrameTimecode:
         else:
             other_inner = None
 
+        # Frame offsets (an `int`, or a frame-number-based timecode) shift the presentation
+        # ordinal by the same amount; time-based offsets leave it unknown because the ordinal of
+        # the resulting frame cannot be derived from wall-clock time on VFR video.
+        if isinstance(other, int):
+            index_shift: int | None = other
+        elif isinstance(other, FrameTimecode) and isinstance(other._time, _FrameNumber):
+            index_shift = other._time.value
+        else:
+            index_shift = None
+        if self._frame_index is None or index_shift is None:
+            self._frame_index = None
+        else:
+            self._frame_index = max(0, self._frame_index + index_shift)
+
         if isinstance(self._time, Timecode) and isinstance(other_inner, Timecode):
             if self._time.time_base == other_inner.time_base:
                 self._time = Timecode(
@@ -723,6 +777,18 @@ class FrameTimecode:
             other_inner = other
         else:
             other_inner = None
+
+        # See `__iadd__`: only exact frame offsets can move the presentation ordinal.
+        if isinstance(other, int):
+            index_shift: int | None = other
+        elif isinstance(other, FrameTimecode) and isinstance(other._time, _FrameNumber):
+            index_shift = other._time.value
+        else:
+            index_shift = None
+        if self._frame_index is None or index_shift is None:
+            self._frame_index = None
+        else:
+            self._frame_index = max(0, self._frame_index - index_shift)
 
         if isinstance(self._time, Timecode) and isinstance(other_inner, Timecode):
             if self._time.time_base == other_inner.time_base:

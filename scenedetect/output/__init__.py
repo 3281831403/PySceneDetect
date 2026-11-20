@@ -72,6 +72,14 @@ from scenedetect.output.video import (
 )
 from scenedetect.platform import BytePath, StrPath
 
+
+def _frame_index(timecode: FrameTimecode) -> int:
+    """Exact 0-based presentation ordinal of `timecode`, falling back to the PTS-derived
+    :attr:`FrameTimecode.frame_num` when no ordinal is known (e.g. timecodes not produced by
+    reading a video). The two always coincide for CFR video."""
+    return timecode.frame_index if timecode.frame_index is not None else timecode.frame_num
+
+
 logger = logging.getLogger("pyscenedetect")
 
 
@@ -195,16 +203,18 @@ def write_scene_list(
     )
     for i, (start, end) in enumerate(scene_list):
         duration = end - start
+        start_frame = _frame_index(start) + 1
+        end_frame = _frame_index(end)
         csv_writer.writerow(
             [
                 f"{i + 1:d}",
-                f"{start.frame_num + 1:d}",
+                f"{start_frame:d}",
                 start.get_timecode(),
                 f"{start.seconds:.3f}",
-                f"{end.frame_num:d}",
+                f"{end_frame:d}",
                 end.get_timecode(),
                 f"{end.seconds:.3f}",
-                f"{duration.frame_num:d}",
+                f"{max(end_frame - start_frame + 1, 0):d}",
                 duration.get_timecode(),
                 f"{duration.seconds:.3f}",
             ]
@@ -300,17 +310,19 @@ def write_scene_list_html(
     ]
     for i, (start, end) in enumerate(scene_list):
         duration = end - start
+        start_frame = _frame_index(start) + 1
+        end_frame = _frame_index(end)
 
         row = SimpleTableRow(
             [
                 f"{i + 1:d}",
-                f"{start.frame_num + 1:d}",
+                f"{start_frame:d}",
                 start.get_timecode(),
                 f"{start.seconds:.3f}",
-                f"{end.frame_num:d}",
+                f"{end_frame:d}",
                 end.get_timecode(),
                 f"{end.seconds:.3f}",
-                f"{duration.frame_num:d}",
+                f"{max(end_frame - start_frame + 1, 0):d}",
                 duration.get_timecode(),
                 f"{duration.seconds:.3f}",
             ]

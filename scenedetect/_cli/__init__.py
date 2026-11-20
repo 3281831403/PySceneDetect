@@ -1900,7 +1900,7 @@ def save_qp_command(
 
 SAVE_KEYFRAMES_HELP = """Save detected cuts using keyframe format v1.
 
-Frame numbers are currently approximate for variable framerate (VFR) video.
+Frame numbers are exact presentation ordinals, including for variable framerate (VFR) video.
 """
 
 
